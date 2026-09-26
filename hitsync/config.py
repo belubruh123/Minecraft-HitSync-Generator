@@ -96,7 +96,16 @@ class SyncParams:
     transition: str = "cut"         # "cut" | "flash"
     flash_duration: float = 0.12
 
+    # --- Velocity edit / slow-mo lead-ins -------------------------------------
+    velocity: float = 0.0           # 0..0.9: slow on each impact, fast in between
+    lead_in_beats: int = 4          # length of a combo's slow-mo lead-in
+    lead_in_speed: float = 0.45     # its slow-mo speed
+
     # --- 3. Cinematic letterbox ----------------------------------------------
+    # slowmo = bars on the slow-mo intro and lead-ins only (flash, then full
+    # frame on the first hit) | first combo | combos | off
+    letterbox_mode: str = "slowmo"
+    intro_flash: bool = True        # quick white flash as each slow-mo part ends
     letterbox_enabled: bool = True
     letterbox_aspect: float = 2.39  # target aspect ratio when bars are fully in
     letterbox_fade: float = 0.25    # ease in/out duration (s)

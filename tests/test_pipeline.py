@@ -70,15 +70,18 @@ class PipelineTests(unittest.TestCase):
         n = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         fps = cap.get(cv2.CAP_PROP_FPS)
         self.assertAlmostEqual(n / fps, sched.duration, delta=0.2)
-        # a frame in the middle of the first combo has letterbox bars
+        # letterbox bars during the slow-mo intro only (spans are in song
+        # time; the video starts at sched.start)
+        self.assertEqual(sched.letterbox_snap, [True])
         start, end = sched.letterbox[0]
-        cap.set(cv2.CAP_PROP_POS_MSEC, (start + end) / 2 * 1000)
+        cap.set(cv2.CAP_PROP_POS_MSEC, ((start + end) / 2 + 0.2 - sched.start) * 1000)
         ok, frame = cap.read()
         self.assertTrue(ok)
         self.assertLess(frame[:5].mean(), 8)
         self.assertLess(frame[-5:].mean(), 8)
-        # a frame in the intro has no bars
-        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        # the first combo plays full frame
+        a, b, _ = sched.combo_spans[0]
+        cap.set(cv2.CAP_PROP_POS_MSEC, ((a + b) / 2 - sched.start) * 1000)
         ok, frame = cap.read()
         self.assertTrue(ok)
         self.assertGreater(frame[:5].mean(), 30)
