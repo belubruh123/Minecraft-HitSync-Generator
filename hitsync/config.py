@@ -63,6 +63,7 @@ class SyncParams:
     # long before the drop (snapped to whole beats) and only the footage that
     # fills it in slow-mo is used. 0 = keep the whole music intro.
     intro_length: float = 5.0
+    intro_auto: bool = True         # intro length follows the song's own intro
 
     # --- Beat grid -----------------------------------------------------------
     static_grid: bool = True        # one constant tempo for the whole song

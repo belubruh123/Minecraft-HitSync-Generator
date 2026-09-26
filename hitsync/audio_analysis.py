@@ -1,62 +1,126 @@
-"""Music analysis: beats (with time-varying tempo), RMS energy, drop detection."""
+"""Music analysis: constant beat grid, downbeats, song sections, loudness.
+
+The grid, downbeats and start/drop candidates come from ``music_grid`` and
+``sections`` (numpy only, one STFT pass). A classic beat tracker (librosa)
+is only run when it is needed: for songs whose tempo wanders (live bands)
+and for the "dynamic grid" mode. Its beats are snapped onto the measured
+attacks, so they sit on the kick, not a frame after it.
+"""
 from __future__ import annotations
 
-import os
-import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from .ffmpeg_utils import extract_audio_wav, find_ffmpeg
+from . import music_grid, sections as sections_mod
+from .music_grid import HOP, SR, Grid
+from .sections import Sections
 
-SR = 22050
-HOP = 256          # ~11.6 ms beat-time resolution
+
+def _arr(d, k, dtype=float):
+    v = d.get(k)
+    return np.asarray(v if v is not None else [], dtype=dtype)
 
 
 @dataclass
 class AudioAnalysis:
     path: str
     duration: float
-    tempo: float                 # global BPM estimate
-    beats: np.ndarray            # beat times (s)
-    rms_times: np.ndarray
-    rms: np.ndarray              # RMS normalised to 0..1
-    tempo_times: np.ndarray      # librosa frame-wise tempo (for display)
-    tempo_bpm: np.ndarray
-    perc_rms: np.ndarray | None = None   # drums-only RMS (same frames as rms)
+    grid: Grid
+    sections: Sections
+    onsets: np.ndarray             # attack times (s)
+    drum_w: np.ndarray             # drum-weighted strength per attack
+    env_rate: float
+    env: np.ndarray                # onset envelope (beat tracker input)
+    curve_t: np.ndarray            # ~23 ms loudness/activity curves, 0..1
+    level: np.ndarray
+    bass: np.ndarray
+    kick: np.ndarray
+    snare: np.ndarray
+    tracked: np.ndarray | None = field(default=None, repr=False)
 
+    # ----------------------------------------------------------- derived
+    @property
+    def tempo(self) -> float:
+        return self.grid.bpm
+
+    @property
+    def rms_times(self) -> np.ndarray:        # display curve (timeline)
+        return self.curve_t
+
+    @property
+    def rms(self) -> np.ndarray:
+        return self.level
+
+    @property
+    def drums(self) -> np.ndarray:
+        return np.clip(0.6 * self.kick + 0.4 * self.snare, 0, 1)
+
+    @property
+    def beats(self) -> np.ndarray:
+        """Beat-tracker beats (dynamic grid); computed on first use."""
+        if self.tracked is None:
+            self.tracked = track_beats(self.env, self.env_rate, self.onsets, self.grid.bpm,
+                                       self.duration)
+        return self.tracked
+
+    def grid_for(self, bpm: float = 0.0, offset: float = 0.0) -> Grid:
+        """The static grid, optionally with a forced tempo and a phase nudge."""
+        g = self.grid
+        if bpm > 0 and abs(bpm - g.bpm) > 1e-6:
+            forced = music_grid.grid_with_tempo(self.onsets, self.drum_w, self.duration, bpm)
+            # keep the detected bar lines: the downbeat nearest the original one
+            first_db = g.phase + g.period * g.downbeat
+            k = int(round((first_db - forced.phase) / forced.period)) % 4
+            g = Grid(forced.bpm, forced.phase, k, forced.confidence, False, g.candidates)
+        if offset:
+            P = g.period
+            shifted = g.phase + offset
+            turns = int(np.floor(shifted / P))
+            g = Grid(g.bpm, shifted - turns * P, (g.downbeat - turns) % 4, g.confidence,
+                     g.drift, g.candidates)
+        return g
+
+    # ----------------------------------------------------------- persist
     def to_dict(self):
-        return {"path": self.path, "duration": self.duration, "tempo": self.tempo,
-                "beats": self.beats.tolist(), "rms_times": self.rms_times.tolist(),
-                "rms": self.rms.tolist(), "tempo_times": self.tempo_times.tolist(),
-                "tempo_bpm": self.tempo_bpm.tolist(),
-                "perc_rms": None if self.perc_rms is None else self.perc_rms.tolist()}
+        r = lambda a, n=4: None if a is None else np.round(np.asarray(a, float), n).tolist()  # noqa: E731
+        return {"path": self.path, "duration": self.duration, "grid": self.grid.to_dict(),
+                "sections": self.sections.to_dict(), "onsets": r(self.onsets, 5),
+                "drum_w": r(self.drum_w, 3), "env_rate": self.env_rate, "env": r(self.env, 3),
+                "curve_t": r(self.curve_t, 4), "level": r(self.level, 3),
+                "bass": r(self.bass, 3), "kick": r(self.kick, 3), "snare": r(self.snare, 3),
+                "tracked": r(self.tracked, 5)}
 
     @classmethod
     def from_dict(cls, d):
-        arr = lambda k: np.asarray(d.get(k, []), dtype=float)  # noqa: E731
-        return cls(d["path"], float(d["duration"]), float(d["tempo"]), arr("beats"),
-                   arr("rms_times"), arr("rms"), arr("tempo_times"), arr("tempo_bpm"),
-                   arr("perc_rms") if d.get("perc_rms") is not None else None)
+        if "grid" not in d:
+            raise KeyError("old analysis format")
+        tracked = d.get("tracked")
+        return cls(d["path"], float(d["duration"]), Grid.from_dict(d["grid"]),
+                   Sections.from_dict(d.get("sections")), _arr(d, "onsets"), _arr(d, "drum_w"),
+                   float(d["env_rate"]), _arr(d, "env", np.float32), _arr(d, "curve_t"),
+                   _arr(d, "level", np.float32), _arr(d, "bass", np.float32),
+                   _arr(d, "kick", np.float32), _arr(d, "snare", np.float32),
+                   None if tracked is None else np.asarray(tracked, float))
 
 
-def load_audio(path: str, sr: int = SR):
-    import librosa
-
-    if find_ffmpeg():
-        fd, tmp = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        try:
-            extract_audio_wav(path, tmp, sr=sr)
-            y, _ = librosa.load(tmp, sr=sr, mono=True)
-        finally:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-    else:
-        y, _ = librosa.load(path, sr=sr, mono=True)
-    return y, sr
+def analyze_audio(path: str, progress=None) -> AudioAnalysis:
+    report = progress or (lambda *_: None)
+    report("Loading audio", 0.05)
+    y = music_grid.decode_mono(path, SR)
+    ma = music_grid.analyze(y, SR, progress=lambda m, f: report(m, 0.1 + 0.75 * f))
+    report("Song sections", 0.9)
+    beats = ma.grid.beats(ma.duration)
+    bars = beats[ma.grid.is_downbeat(beats)]
+    secs = sections_mod.detect(ma.curve_t, ma.level, ma.bass, ma.kick, ma.snare, bars,
+                               ma.duration)
+    a = AudioAnalysis(path, ma.duration, ma.grid, secs, ma.onsets, ma.drum_w, ma.env_rate,
+                      ma.env, ma.curve_t, ma.level, ma.bass, ma.kick, ma.snare)
+    if ma.grid.drift:              # live tempo: the tracked beats are the grid
+        report("Tracking a live tempo", 0.95)
+        a.beats  # noqa: B018  (computes and stores them)
+    report("Audio done", 1.0)
+    return a
 
 
 def _fold_octave(bpm: np.ndarray, ref: float) -> np.ndarray:
@@ -67,160 +131,50 @@ def _fold_octave(bpm: np.ndarray, ref: float) -> np.ndarray:
     return out
 
 
-def analyze_audio(path: str, progress=None) -> AudioAnalysis:
+def track_beats(env, rate, onsets, bpm_hint: float, duration: float) -> np.ndarray:
+    """Beat tracking that follows tempo changes, snapped onto attacks."""
     import librosa
     from scipy.ndimage import median_filter
 
-    report = progress or (lambda *_: None)
-    report("Loading audio", 0.05)
-    y, sr = load_audio(path)
-    duration = len(y) / sr
-
-    report("Onset envelope", 0.25)
-    # One mel spectrogram feeds both the onset envelope and the drum split
-    # (same result as onset_strength(y=...), without computing it twice).
-    mel = librosa.feature.melspectrogram(y=y, sr=sr, hop_length=HOP)
-    oenv = librosa.onset.onset_strength(S=librosa.power_to_db(mel, ref=np.max), sr=sr,
-                                        hop_length=HOP, aggregate=np.median)
-
-    report("Tempo tracking", 0.45)
-    global_tempo = float(np.atleast_1d(
-        librosa.feature.tempo(onset_envelope=oenv, sr=sr, hop_length=HOP))[0])
-    local = np.atleast_1d(librosa.feature.tempo(
-        onset_envelope=oenv, sr=sr, hop_length=HOP, aggregate=None, ac_size=6.0))
-    local = _fold_octave(local.astype(float), global_tempo)
-    frames_per_sec = sr / HOP
-    local = median_filter(local, size=max(3, int(4 * frames_per_sec)), mode="nearest")
-
-    report("Beat tracking", 0.65)
+    env = np.asarray(env, float)
+    if len(env) < 16:
+        return np.zeros(0)
+    sr, hop = SR, int(round(SR / rate))
+    local = np.atleast_1d(librosa.feature.tempo(onset_envelope=env, sr=sr, hop_length=hop,
+                                                aggregate=None, ac_size=6.0))
+    ref = bpm_hint if bpm_hint > 0 else float(np.median(local))
+    local = _fold_octave(local.astype(float), ref)
+    local = median_filter(local, size=max(3, int(4 * rate)), mode="nearest")
     try:
-        # librosa >= 0.10 accepts a time-varying tempo curve here.
-        _, beats = librosa.beat.beat_track(onset_envelope=oenv, sr=sr, hop_length=HOP,
+        _, beats = librosa.beat.beat_track(onset_envelope=env, sr=sr, hop_length=hop,
                                            bpm=local, units="time", trim=False)
     except Exception:
-        _, beats = librosa.beat.beat_track(onset_envelope=oenv, sr=sr, hop_length=HOP,
-                                           bpm=global_tempo, units="time", trim=False)
-    beats = np.asarray(beats, dtype=float)
-
-    report("Energy", 0.85)
-    rms = librosa.feature.rms(y=y, hop_length=HOP)[0]
-    beats = snap_beats_to_onsets(beats, oenv, sr)
-    rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=HOP)
-    rms = rms / (rms.max() + 1e-9)
-    tempo_times = librosa.frames_to_time(np.arange(len(local)), sr=sr, hop_length=HOP)
-
-    # The drop is where the drums come in, which vocals/pads can mask in a
-    # full-mix energy curve: keep a percussive-only RMS for drop detection.
-    report("Drum energy", 0.92)
-    perc = librosa.feature.rms(y=percussive(y), hop_length=HOP)[0]
-    perc = perc[: len(rms)] / (perc.max() + 1e-9)
-
-    report("Audio done", 1.0)
-    return AudioAnalysis(path, duration, global_tempo, beats, rms_times, rms,
-                         tempo_times, local, perc)
+        _, beats = librosa.beat.beat_track(onset_envelope=env, sr=sr, hop_length=hop,
+                                           bpm=ref, units="time", trim=False)
+    return snap_to_attacks(np.asarray(beats, float), np.asarray(onsets, float))
 
 
-def _median_filter(S: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    """scipy median_filter split across threads (it releases the GIL).
-
-    The array is cut along the axis the kernel doesn't span, so every block
-    sees exactly the neighbours it would see unsplit: identical output.
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    from scipy.ndimage import median_filter
-
-    other = 0 if size[0] == 1 else 1
-    n = int(np.clip(os.cpu_count() or 1, 1, 16))
-    edges = np.linspace(0, S.shape[other], n + 1).astype(int)
-
-    def block(k):
-        sl = [slice(None), slice(None)]
-        sl[other] = slice(edges[k], edges[k + 1])
-        return median_filter(S[tuple(sl)], size=size, mode="reflect")
-
-    with ThreadPoolExecutor(n) as ex:
-        return np.concatenate(list(ex.map(block, range(n))), axis=other)
-
-
-def percussive(y: np.ndarray, kernel_size: int = 31) -> np.ndarray:
-    """Same as librosa.effects.percussive(y), with the two median filters
-    (90% of its time) run in parallel."""
-    import librosa
-
-    D = librosa.stft(y)
-    S, phase = librosa.magphase(D)
-    harm = _median_filter(S, (1, kernel_size))
-    perc = _median_filter(S, (kernel_size, 1))
-    mask = librosa.util.softmask(perc, harm, power=2.0, split_zeros=True)
-    return librosa.istft((S * mask) * phase, dtype=y.dtype, length=len(y))
-
-
-def snap_beats_to_onsets(beats, oenv, sr, max_shift: float = 0.07) -> np.ndarray:
-    """Move each beat onto the attack of the nearest detected onset.
-
-    The beat tracker reports the onset-strength peak, which trails the audible
-    transient by a frame or two. Backtracking onsets to the preceding minimum
-    of the onset envelope gives the true attack (~±4 ms in testing), so hits
-    lock to the start of the kick. (Backtracking on wide-frame RMS overshoots.)
-    """
-    import librosa
-
-    if not len(beats):
+def snap_to_attacks(beats: np.ndarray, attacks: np.ndarray, max_shift: float = 0.07):
+    """Move each beat onto the nearest measured attack (within max_shift)."""
+    if not len(beats) or not len(attacks):
         return beats
-    frames = librosa.onset.onset_detect(onset_envelope=oenv, sr=sr, hop_length=HOP,
-                                        units="frames")
-    if not len(frames):
-        return beats
-    frames = librosa.onset.onset_backtrack(frames, oenv)
-    onsets = librosa.frames_to_time(frames, sr=sr, hop_length=HOP)
-    idx = np.clip(np.searchsorted(onsets, beats), 1, len(onsets) - 1) if len(onsets) > 1 else None
-    out = beats.copy()
-    for k, b in enumerate(beats):
-        cand = onsets if idx is None else onsets[idx[k] - 1: idx[k] + 1]
-        near = cand[np.argmin(np.abs(cand - b))]
-        if abs(near - b) <= max_shift:
-            out[k] = near
+    i = np.clip(np.searchsorted(attacks, beats), 1, max(1, len(attacks) - 1))
+    lo = attacks[i - 1]
+    hi = attacks[np.minimum(i, len(attacks) - 1)]
+    near = np.where(np.abs(lo - beats) <= np.abs(hi - beats), lo, hi)
+    out = np.where(np.abs(near - beats) <= max_shift, near, beats)
     return np.unique(np.round(out, 4))
 
 
-def detect_drop(rms_times, rms, beats, search_start: float = 2.0,
-                search_end: float | None = None, window: float = 4.0) -> float:
-    """Find the beat where energy jumps the most (the "drop").
-
-    Score for each candidate beat = mean dB energy in the ``window`` after it
-    minus the mean in the window before it, favouring loud post-drop sections.
-    """
-    rms_times = np.asarray(rms_times, float)
-    rms = np.asarray(rms, float)
-    if len(rms) < 4:
-        return 0.0
-    duration = float(rms_times[-1])
-    if search_end is None:
-        search_end = min(duration * 0.6, 120.0)
-    db = 20 * np.log10(rms + 1e-4)
-    dt = rms_times[1] - rms_times[0]
-    k = max(1, int(0.25 / dt))
-    db = np.convolve(db, np.ones(k) / k, mode="same")
-    csum = np.concatenate([[0.0], np.cumsum(db)])
-
-    def mean_between(a, b):
-        i, j = np.searchsorted(rms_times, [a, b])
-        j = max(j, i + 1)
-        return (csum[min(j, len(db))] - csum[i]) / max(1, min(j, len(db)) - i)
-
-    candidates = np.asarray(beats, float)
-    if len(candidates) < 4:
-        candidates = np.arange(search_start, search_end, 0.1)
-    candidates = candidates[(candidates >= search_start) & (candidates <= search_end)]
-    if not len(candidates):
-        return 0.0
-    loud = np.percentile(db, 60)
-    best_t, best = float(candidates[0]), -np.inf
-    for t in candidates:
-        pre = mean_between(max(0.0, t - window), t)
-        post = mean_between(t, min(duration, t + window))
-        score = (post - pre) + 0.25 * min(0.0, post - loud)
-        if score > best:
-            best, best_t = score, float(t)
-    return best_t
+def click_track(beats, downbeats, n: int, sr: int = 44100) -> np.ndarray:
+    """Metronome clicks (accented on downbeats) as a mono float32 track."""
+    out = np.zeros(n, np.float32)
+    t = np.arange(int(0.03 * sr)) / sr
+    for freq, times in ((1500.0, beats), (2500.0, downbeats)):
+        click = (np.sin(2 * np.pi * freq * t) * np.exp(-t * 180) * 0.5).astype(np.float32)
+        for b in times:
+            i = int(round(b * sr))
+            if 0 <= i < n:
+                j = min(n, i + len(click))
+                out[i:j] = click[: j - i]
+    return out

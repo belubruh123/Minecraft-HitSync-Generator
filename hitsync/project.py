@@ -9,8 +9,8 @@ from typing import Optional
 
 import numpy as np
 
-from . import analysis_cache, beatgrid
-from .audio_analysis import AudioAnalysis, analyze_audio, detect_drop
+from . import analysis_cache, sections as sections_mod
+from .audio_analysis import AudioAnalysis, analyze_audio
 from .config import DetectParams, RenderParams, SyncParams
 from .models import Markers
 from .sync_engine import Schedule, build_schedule
@@ -32,6 +32,7 @@ class Project:
     markers: Markers = field(default_factory=Markers)
     schedule: Optional[Schedule] = None
     grid_bpm: float = 0.0          # tempo of the fitted static grid
+    downbeats: list = field(default_factory=list)   # bar starts (music s)
     # Fingerprints of the media the cached analysis came from, so changing
     # only the music (or only the video) re-analyses just that file.
     audio_key: str = ""
@@ -137,19 +138,71 @@ class Project:
         return need_a, need_v
 
     def apply_beat_grid(self):
-        """Beats on the timeline = static grid fitted to the detected beats."""
+        """Beats on the timeline = the song's constant grid.
+
+        The grid is measured from the audio itself (tempo, phase, bar lines).
+        ``bpm_override`` forces a tempo, ``grid_offset_ms`` nudges the phase.
+        Songs whose tempo wanders (or the dynamic mode) use tracked beats.
+        """
         if self.audio is None:
             return
-        s = self.sync
-        if s.static_grid:
-            grid, bpm, _ = beatgrid.fit_static_grid(self.audio.beats, self.audio.duration,
-                                                    s.bpm_override, s.grid_offset_ms / 1000.0)
-            self.markers.set_beats(grid)
-            self.grid_bpm = bpm
+        s, a = self.sync, self.audio
+        if s.static_grid and not (a.grid.drift and s.bpm_override <= 0):
+            g = a.grid_for(s.bpm_override, s.grid_offset_ms / 1000.0)
+            beats = g.beats(a.duration)
+            self.markers.set_beats(beats)
+            self.downbeats = [float(b) for b in beats[g.is_downbeat(beats)]]
+            self.grid_bpm = g.bpm
         else:
-            self.markers.set_beats(self.audio.beats)
-            self.grid_bpm = 60.0 / float(np.median(np.diff(self.audio.beats))) \
-                if len(self.audio.beats) > 1 else 0.0
+            beats = a.beats
+            self.markers.set_beats(beats)
+            self.downbeats = [float(b) for b in beats[::4]]
+            self.grid_bpm = 60.0 / float(np.median(np.diff(beats))) if len(beats) > 1 else 0.0
+
+    @property
+    def beat_period(self) -> float:
+        b = self.markers.beats
+        return float(np.median(np.diff(b))) if len(b) > 1 else 0.5
+
+    # -------------------------------------------------------- beat fixes
+    def set_tempo_factor(self, factor: float):
+        """Half / double the grid tempo (the detector picked the wrong level)."""
+        if self.grid_bpm > 0:
+            self.sync.bpm_override = self.grid_bpm * factor
+            self.apply_beat_grid()
+
+    def shift_half_beat(self):
+        """The grid sits on the off-beats: move it by half a beat."""
+        half = self.beat_period / 2 * 1000.0
+        self.sync.grid_offset_ms = (self.sync.grid_offset_ms + half) % (2 * half)
+        self.apply_beat_grid()
+
+    def nudge_grid(self, ms: float):
+        self.sync.grid_offset_ms += ms
+        self.apply_beat_grid()
+
+    def tap_tempo(self, taps) -> bool:
+        """Tempo and phase from times tapped along with the music."""
+        from .music_grid import tap_tempo
+
+        res = tap_tempo(taps)
+        if res is None or self.audio is None:
+            return False
+        bpm, phase = res
+        self.sync.bpm_override = round(bpm, 2)
+        self.sync.grid_offset_ms = 0.0
+        g = self.audio.grid_for(self.sync.bpm_override)
+        # tapped phase wins over the fitted one when they disagree by > 40 ms
+        d = (phase - g.phase + g.period / 2) % g.period - g.period / 2
+        if abs(d) > 0.04:
+            self.sync.grid_offset_ms = d * 1000.0
+        self.apply_beat_grid()
+        return True
+
+    def reset_grid(self):
+        self.sync.bpm_override = 0.0
+        self.sync.grid_offset_ms = 0.0
+        self.apply_beat_grid()
 
     def redetect_hits(self):
         """Re-run peak picking on cached signals (no media decoding)."""
@@ -165,16 +218,37 @@ class Project:
         """Combos long enough to make the edit."""
         return [g for g in self.markers.combos() if len(g) >= max(1, self.sync.min_combo_len)]
 
+    def start_candidates(self) -> list:
+        """[(time, label)] of likely music starts, snapped to the grid."""
+        if self.audio is None:
+            return []
+        out = []
+        for c in self.audio.sections.top(3):
+            out.append((self._snap_beat(c.time), c.label))
+        return out
+
+    def _snap_beat(self, t: float) -> float:
+        b = self.markers.beats
+        if not b:
+            return t
+        arr = np.asarray(b)
+        return float(arr[np.argmin(np.abs(arr - t))])
+
     def auto_drop(self) -> float:
+        """Music start (the drop) = the song's first big moment."""
         if self.audio is None:
             return 0.0
-        a = self.audio
-        energy = a.perc_rms if a.perc_rms is not None and len(a.perc_rms) else a.rms
-        t = detect_drop(a.rms_times[: len(energy)], energy, self.markers.beats)
-        if self.markers.beats:
-            b = np.asarray(self.markers.beats)
-            t = float(b[np.argmin(np.abs(b - t))])
+        return self.set_drop(self.audio.sections.best)
+
+    def set_drop(self, t: float) -> float:
+        """Set where the first combo hit lands (snapped to the beat grid);
+        the slow-mo intro length follows the song when it is automatic."""
+        t = self._snap_beat(t)
         self.sync.drop_time = t
+        if self.sync.intro_auto and self.audio is not None:
+            secs = self.audio.sections
+            self.sync.intro_length = sections_mod.auto_intro_length(
+                t, self.downbeats, secs.first_sound, self.beat_period)
         return t
 
     def auto_intro(self):
@@ -225,7 +299,7 @@ class Project:
             "output_path": self.output_path,
             "detect": self.detect.to_dict(), "sync": self.sync.to_dict(),
             "render": self.render_params.to_dict(),
-            "markers": self.markers.to_dict(),
+            "markers": self.markers.to_dict(), "downbeats": list(self.downbeats),
             "audio_key": self.audio_key, "video_key": self.video_key,
             "audio": self.audio.to_dict() if self.audio else None,
             "video": self.video.to_dict() if self.video else None,
@@ -246,8 +320,12 @@ class Project:
         if len(p.markers.beats) > 1:
             p.grid_bpm = 60.0 / float(np.median(np.diff(p.markers.beats)))
         if d.get("audio"):
-            p.audio = AudioAnalysis.from_dict(d["audio"])
-            p.audio_key = d.get("audio_key") or p.current_audio_key()
+            try:
+                p.audio = AudioAnalysis.from_dict(d["audio"])
+                p.audio_key = d.get("audio_key") or p.current_audio_key()
+            except (KeyError, TypeError, ValueError):
+                p.audio, p.audio_key = None, ""       # older format: re-analysed on demand
+        p.downbeats = list(d.get("downbeats") or p.markers.beats[::4])
         if d.get("video"):
             p.video = VideoAnalysis.from_dict(d["video"])
             p.video_key = d.get("video_key") or p.current_video_key()

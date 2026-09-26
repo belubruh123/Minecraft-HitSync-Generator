@@ -57,14 +57,6 @@ class FastAnalysisTests(unittest.TestCase):
         np.testing.assert_allclose(three.red, one.red)
         np.testing.assert_allclose(three.motion, one.motion, atol=1e-6)
 
-    def test_parallel_percussive_matches_librosa(self):
-        import librosa
-
-        from hitsync.audio_analysis import percussive
-
-        y, _ = librosa.load(self.music, sr=22050, duration=8.0)
-        np.testing.assert_allclose(percussive(y), librosa.effects.percussive(y), atol=1e-5)
-
     # ----------------------------------------------------------- incremental
     def test_changing_music_only_reanalyses_music(self):
         p = self._project()

@@ -3,12 +3,15 @@
     python -m hitsync                       # GUI
     python -m hitsync run VIDEO MUSIC -o out.mp4 [--intro 3 8] [--drop 12.5]
     python -m hitsync check                 # dependency report
+    python -m hitsync beats SONG [--click out.wav]   # check the beat detection
 """
 from __future__ import annotations
 
 import argparse
 import importlib
 import sys
+
+import numpy as np
 
 
 def check_dependencies() -> bool:
@@ -32,6 +35,44 @@ def check_dependencies() -> bool:
 
 def _progress(msg, frac):
     print(f"\r{frac * 100:5.1f}%  {msg:<60}", end="", flush=True)
+
+
+def beats(args) -> int:
+    """Print what was detected in a song; optionally render it with clicks."""
+    from .audio_analysis import analyze_audio, click_track
+    from .sections import auto_intro_length
+
+    a = analyze_audio(args.song)
+    g = a.grid
+    grid_beats = g.beats(a.duration)
+    bars = grid_beats[g.is_downbeat(grid_beats)]
+    print(f"Tempo      {g.bpm:.2f} BPM   (confidence {g.confidence:.0%}"
+          f"{', tempo wanders: tracked beats are used' if g.drift else ''})")
+    print(f"First beat {g.phase:.3f} s, first bar line {bars[0] if len(bars) else 0:.3f} s")
+    if g.candidates:
+        print("Other tempos considered: " + ", ".join(f"{b:.2f}" for b, _ in g.candidates[1:]))
+    secs = a.sections
+    print(f"Sound starts {secs.first_sound:.2f} s, song ends (last loud bar) {secs.song_end:.2f} s")
+    print("Music start candidates:")
+    for c in secs.top(3):
+        mark = "  <- default" if abs(c.time - secs.best) < 1e-3 else ""
+        print(f"  {_mmss(c.time)}  {c.label}{mark}")
+    intro = auto_intro_length(secs.best, bars, secs.first_sound, g.period)
+    print(f"Slow-mo intro: {intro:.2f} s of song before the start")
+    if args.click:
+        from .audio_mix import load_music, write_wav, SR
+
+        music = load_music(args.song)
+        beats_used = a.beats if g.drift else grid_beats
+        clicks = click_track(beats_used, bars if not g.drift else beats_used[::4], len(music), SR)
+        write_wav(args.click, np.clip(music * 0.7 + clicks[:, None], -1, 1))
+        print(f"Wrote {args.click}: the song with a click on every detected beat "
+              "(high click = bar start)")
+    return 0
+
+
+def _mmss(t: float) -> str:
+    return f"{int(t // 60)}:{t % 60:05.2f}"
 
 
 def run(args) -> int:
@@ -89,6 +130,9 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("gui", help="launch the desktop editor (default)")
     sub.add_parser("check", help="verify dependencies")
+    bt = sub.add_parser("beats", help="show the detected tempo, beats and music start")
+    bt.add_argument("song")
+    bt.add_argument("--click", help="write the song with a metronome click to this .wav")
     r = sub.add_parser("run", help="headless analyze + render")
     r.add_argument("video")
     r.add_argument("music")
@@ -125,6 +169,8 @@ def main(argv=None) -> int:
         return 0 if check_dependencies() else 1
     if args.cmd == "run":
         return run(args)
+    if args.cmd == "beats":
+        return beats(args)
     from .gui.app import main as gui_main
 
     gui_main()
