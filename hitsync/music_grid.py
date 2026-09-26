@@ -21,6 +21,9 @@ SR = 22050
 HOP = 256            # onset-envelope frame: 11.6 ms
 N_FFT = 2048
 MIN_BPM, MAX_BPM = 55.0, 215.0
+# subdivision test: no penalty while the grid's two halves differ by less than
+# ALT_R (ratio of their mean hit strength), then a penalty growing with ALT_K
+ALT_K, ALT_R = 1.0, 1.3
 
 
 # ---------------------------------------------------------------- decoding
@@ -322,9 +325,19 @@ def estimate_grid(onset_t: np.ndarray, onset_w: np.ndarray, beat_t: np.ndarray,
         for f in fine:
             if all(abs(f[0] / k[0] - 1) > 0.03 for k in kept):
                 kept.append(f)
+        tempos = [b for b, _, _ in kept]
+        # the true beat can hide behind a syncopated riff (3-3-2 rhythms fold
+        # well at 1.5x or 2x): always weigh the related tempos of the leaders
+        for b in tempos[:3]:
+            for r in (0.5, 2 / 3, 1.5, 2.0):
+                c = b * r
+                if MIN_BPM <= c <= MAX_BPM and all(abs(c / t - 1) > 0.03 for t in tempos):
+                    tempos.append(_fine_tempo(c, beat_t, beat_w, width))
         # 3. metrical level: fold strength x tempo prior x "not a subdivision"
-        scored = [(b, _prior(b) * _level_score(b, beat_t, beat_w, accent_w))
-                  for b, _, _ in kept]
+        #    x "the song repeats every 4 and 8 beats" (every bar and 2 bars)
+        acf, rate = _envelope_acf(beat_t, beat_w, duration)
+        scored = [(b, _prior(b) * _level_score(b, beat_t, beat_w, accent_w)
+                   * _bar_repetition(b, acf, rate)) for b in tempos]
         best = max(scored, key=lambda c: c[1])
         # a very fast "beat" with a strong half tempo is felt at the half
         if best[0] > 176:
@@ -333,21 +346,44 @@ def estimate_grid(onset_t: np.ndarray, onset_w: np.ndarray, beat_t: np.ndarray,
                 best = half[0]
         chosen = best[0]
         cands = []
-        for b, sc in sorted(scored, key=lambda c: -c[1]):
+        for b, sc in [best] + sorted(scored, key=lambda c: -c[1]):     # chosen first
             if all(abs(b / c[0] - 1) > 0.015 for c in cands):     # distinct tempos only
                 cands.append((round(b, 2), round(float(sc), 3)))
         cands = cands[:4]
     P = 60.0 / chosen
-    period, phase, conf, drift = _fit_line(beat_t, beat_w, P, fixed=bpm > 0,
+    # the line follows the loud accents (kick, snare), not loose vocal notes
+    period, phase, conf, drift = _fit_line(beat_t, accent_w, P, fixed=bpm > 0,
                                            duration=duration, phase_w=accent_w)
     if bpm <= 0:
         # A steady song folds as well over the whole song as over 6 s
         # windows; a live, wandering tempo only lines up locally.
         local, _ = _fold_scores(beat_t, beat_w, [period], width, 6.0)
         whole, _ = _fold_scores(beat_t, beat_w, [period], width, None)
-        if whole[0] < 0.75 * local[0]:
+        if not drift and (whole[0] < 0.55 * local[0]
+                          or _local_tempo_spread(beat_t, beat_w, 60.0 / period) > 0.022):
             drift, conf = True, conf * 0.3
     return Grid(60.0 / period, phase, 0, conf, drift, cands)
+
+
+def _local_tempo_spread(times, weights, bpm, win: float = 12.0, hop: float = 6.0) -> float:
+    """How much the tempo moves through the song: the best tempo within
+    +-6% in each 12 s window, as the 10-90% spread (a fraction). A steady
+    song stays within ~1.5%; a live band wanders 3% or more."""
+    if len(times) < 24:
+        return 0.0
+    rel = np.arange(0.94, 1.0601, 0.001)
+    periods = 60.0 / (bpm * rel)
+    best = []
+    t0 = float(times.min())
+    while t0 + win <= float(times.max()) + 1e-6:
+        sel = (times >= t0) & (times < t0 + win)
+        if sel.sum() >= 12:
+            sc, _ = _fold_scores(times[sel], weights[sel], periods, 0.03, None)
+            best.append(rel[int(np.argmax(sc))])
+        t0 += hop
+    if len(best) < 3:
+        return 0.0
+    return float(np.percentile(best, 90) - np.percentile(best, 10))
 
 
 def _fine_tempo(b0, times, weights, width) -> float:
@@ -362,28 +398,75 @@ def _fine_tempo(b0, times, weights, width) -> float:
     return b
 
 
+def _envelope_acf(times, weights, duration: float, rate: float = 200.0,
+                  max_lag: float = 12.0):
+    """Normalised autocorrelation of the attack envelope (lags up to 12 s)."""
+    from scipy.ndimage import gaussian_filter1d
+
+    n = int(duration * rate) + 2
+    e = np.zeros(n)
+    np.add.at(e, np.clip(np.round(np.asarray(times) * rate).astype(int), 0, n - 1), weights)
+    e = gaussian_filter1d(e, 0.012 * rate)
+    e -= e.mean()
+    m = max(1, int(min(max_lag, duration / 2) * rate))
+    f = np.fft.rfft(e, 2 * n)
+    a = np.fft.irfft(f * np.conj(f))[:m]
+    return a / max(float(a[0]), 1e-12), rate
+
+
+def _bar_repetition(bpm, acf, rate) -> float:
+    """How much the song repeats every 4 and every 8 beats of this tempo.
+
+    Songs repeat their pattern every bar and every two bars. A tempo that
+    only folds well because it matches a syncopated riff (1.5x a 3-3-2
+    rhythm, 4/3 of triplets) puts its "bar" where nothing repeats.
+    """
+    P = 60.0 / bpm
+    w = int(round(0.015 * rate))
+    vals = []
+    for k in (4, 8):
+        i = int(round(k * P * rate))
+        if i + w < len(acf):
+            vals.append(float(acf[max(0, i - w): i + w + 1].max()))
+    if not vals:
+        return 1.0                                   # too short to tell
+    return float(np.clip(np.mean(vals), 0.02, 1.0))
+
+
 def _level_score(bpm, beat_t, beat_w, accent_w) -> float:
     """Fold strength of a tempo, penalised when it is really a subdivision.
 
-    At the true beat level nearly every beat carries a strong accent (a kick
-    or a snare). At the 8th-note level every other grid point is an
-    off-beat with only hats: compare how many grid points of each half
-    (even / odd) have a strong accent.
+    At the 8th-note level every other grid point is an off-beat with only
+    hats, so one half of the grid (even / odd points) hits much weaker than
+    the other. Strength is the rank of each point's strongest attack among
+    the song's attacks, so a clap counts about as much as an 808 kick and a
+    missing beat 3 (phonk, half-time) is not mistaken for a subdivision. A
+    song without a backbeat (kick on 1 and 3 only) looks the same, so the
+    test only applies when half the tempo would itself be a real beat (60
+    BPM or more).
     """
     P = 60.0 / bpm
     sc, _ = _fold_scores(beat_t, beat_w, [P], 0.03, 12.0)
+    fold = float(max(sc[0], 1e-3))
+    if bpm / 2 < 60.0:
+        return fold
     _, ph0 = _fold_scores(beat_t, accent_w, [P], 0.03, None)
-    strong = accent_w >= 0.25 * np.percentile(accent_w, 90)
     k = np.round((beat_t - ph0[0]) / P).astype(int)
     on = np.abs(beat_t - (ph0[0] + k * P)) < 0.035
-    hit = np.unique(k[on & strong])
-    if len(hit) < 8:
-        return float(max(sc[0], 1e-3))
-    span = np.arange(hit.min(), hit.max() + 1)
-    cov = [np.isin(span[span % 2 == par], hit).mean() for par in (0, 1)]
-    ratio = max(cov) / max(min(cov), 1e-3)
-    alt = 1.0 / (1.0 + max(0.0, ratio - 1.3))
-    return float(max(sc[0], 1e-3) * alt)
+    if on.sum() < 8:
+        return fold
+    # each grid point's strongest attack, as a rank among all the song's
+    # attacks (so a clap counts about as much as an 808 kick), then the
+    # mean per half of the grid
+    rank = np.argsort(np.argsort(beat_w)) / max(1, len(beat_w) - 1)
+    kk = k[on] - k[on].min()
+    E = np.zeros(kk.max() + 1)
+    np.maximum.at(E, kk, rank[on])
+    halves = [E[par::2].mean() for par in (0, 1)]
+    ratio = max(halves) / max(min(halves), 1e-6)
+    # one half clearly weaker (only hats on the off-beats): a subdivision
+    alt = max(0.15, 1.0 / (1.0 + ALT_K * max(0.0, ratio - ALT_R)))
+    return fold * alt
 
 
 def _fit_line(times, weights, P, fixed: bool, duration: float, iters: int = 5,
@@ -454,6 +537,45 @@ def _diagnose(times, weights, period, phase, duration):
     if drift:
         conf *= 0.3
     return conf, drift
+
+
+def settle_half_beat(grid: Grid, spec: Spectral, duration: float) -> Grid:
+    """Beat or off-beat? A syncopated riff (3-3-2) hits both, so the fitted
+    grid can lock half a beat late. The beat is where the louder attacks
+    land and where the chords change: compare the grid with the one half
+    a beat later on both, and move it if the later one wins."""
+    from scipy.ndimage import maximum_filter1d
+
+    P = grid.period
+    beats = grid.beats(duration)
+    beats = beats[(beats > 2 * P) & (beats < duration - 2 * P)]
+    if len(beats) < 16:
+        return grid
+    rate = spec.rate
+    w = max(1, int(0.03 * rate))
+    loud = maximum_filter1d(_norm(spec.flux["energy"]), size=2 * w + 1, mode="nearest")
+
+    def attack(ts):
+        return loud[np.clip(np.round(ts * rate).astype(int), 0, spec.n - 1)].mean()
+
+    # chord change: the chroma of the two beats after a point vs the two before
+    cs = np.vstack([np.zeros((1, spec.chroma.shape[1])), np.cumsum(spec.chroma, axis=0)])
+    span = max(1, int(round(2 * P * rate)))
+
+    def change(ts):
+        i = np.clip(np.round(ts * rate).astype(int), span, spec.n - span)
+        a, b = cs[i] - cs[i - span], cs[i + span] - cs[i]
+        a /= np.linalg.norm(a, axis=1, keepdims=True) + 1e-9
+        b /= np.linalg.norm(b, axis=1, keepdims=True) + 1e-9
+        c = 1 - np.sum(a * b, axis=1)
+        return c[c >= np.percentile(c, 75)].mean()      # the real changes, not every beat
+
+    later = beats + P / 2
+    evidence = (np.log((attack(beats) + 1e-6) / (attack(later) + 1e-6))
+                + np.log((change(beats) + 1e-6) / (change(later) + 1e-6)))
+    if evidence < -0.05:
+        grid.phase = (grid.phase + P / 2) % P
+    return grid
 
 
 def find_downbeat(grid: Grid, spec: Spectral, duration: float) -> int:
@@ -532,6 +654,7 @@ def analyze(y: np.ndarray, sr: int = SR, bpm: float = 0.0, progress=None) -> Mus
     report("Tempo", 0.6)
     grid = estimate_grid(attacks, s_full, attacks, drum_w, duration, bpm,
                          (low + high) ** 2 * (0.25 + loud))
+    grid = settle_half_beat(grid, spec, duration)
     grid.downbeat = find_downbeat(grid, spec, duration)
     report("Levels", 0.9)
     k = 2                                   # ~23 ms curve resolution

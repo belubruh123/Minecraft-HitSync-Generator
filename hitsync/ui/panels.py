@@ -282,7 +282,7 @@ class SongRow(QFrame):
     removed = Signal(int)
     reset_cut = Signal(int)
 
-    def __init__(self, k, info: dict, can_remove: bool, current: bool):
+    def __init__(self, k, info: dict, current: bool):
         super().__init__()
         self.k = k
         self.setProperty("card", True)
@@ -308,11 +308,8 @@ class SongRow(QFrame):
                        slot=lambda _=False, d=d: self.moved.emit(self.k, d))
             b.setFixedSize(24, 22)
             top.addWidget(b)
-        rm = button("✕", "Remove this song" if can_remove else
-                    "The only song: drop another song to replace it", flat=True,
-                    slot=lambda: self.removed.emit(self.k))
+        rm = button("✕", "Remove this song", flat=True, slot=lambda: self.removed.emit(self.k))
         rm.setFixedSize(24, 22)
-        rm.setEnabled(can_remove)
         top.addWidget(rm)
         lay.addLayout(top)
         lay.addWidget(ElidedLabel(info["detail"], muted=True))
@@ -365,7 +362,7 @@ class MusicPanel(QWidget):
         self.list.clear()
         self.empty.setVisible(not infos)
         for k, info in enumerate(infos):
-            row = SongRow(k, info, len(infos) > 1, k == current)
+            row = SongRow(k, info, k == current)
             item = QListWidgetItem()
             item.setData(Qt.UserRole, k)
             item.setSizeHint(_row_hint(row))

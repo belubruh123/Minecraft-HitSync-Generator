@@ -423,13 +423,31 @@ class Project:
         self._sync_extra_lists()
 
     def remove_song(self, k: int) -> bool:
-        """Remove song k, the first one included, as long as one song stays."""
+        """Remove song k, the first one included; removing the only song
+        leaves the project without music."""
         recs = self._song_records()
-        if len(recs) < 2 or not 0 <= k < len(recs):
+        if not 0 <= k < len(recs) or not self.music_path:
             return False
+        if len(recs) == 1:
+            self.clear_music()
+            return True
         del recs[k]
         self._set_song_records(recs)
         return True
+
+    def clear_music(self):
+        """No music at all (every song removed)."""
+        self.music_path, self.audio, self.audio_key = "", None, ""
+        self.music_cut = -1.0
+        self.extra_music, self.extra_audio, self.extra_keys = [], [], []
+        self.extra_starts, self.extra_ends = [], []
+        self.grid_fix = {}
+        self.sync.bpm_override, self.sync.grid_offset_ms, self.sync.drop_time = 0.0, 0.0, 0.0
+        self._tl = None
+        self.grid_bpm = 0.0
+        self.markers.set_beats([])
+        self.downbeats = []
+        self.schedule = None
 
     @property
     def beat_period(self) -> float:
@@ -472,6 +490,25 @@ class Project:
 
     def reset_grid(self, song: int = 0):
         self._set_fix(song, 0.0, 0.0)
+
+    def set_song_bpm(self, bpm: float, song: int = 0):
+        """Use this tempo for a song (typed in or picked from the likely
+        tempos). The beat phase is fitted again, keeping the bar lines."""
+        self._set_fix(song, float(bpm), 0.0)
+
+    def tempo_choices(self, song: int = 0) -> list:
+        """Other likely tempos of a song, best first: what the detection
+        weighed, then half and double the one in use."""
+        a = self._song(song)
+        if a is None:
+            return []
+        cur = self.song_grid(song)[2]
+        out = []
+        for b in [float(c[0]) for c in a.grid.candidates] + [a.grid.bpm, cur / 2, cur * 2]:
+            if 40.0 <= b <= 250.0 and abs(b / cur - 1) > 0.015 and \
+                    all(abs(b / o - 1) > 0.015 for o in out):
+                out.append(round(b, 2))
+        return out[:5]
 
     def redetect_hits(self):
         """Re-run peak picking on cached signals (no media decoding)."""

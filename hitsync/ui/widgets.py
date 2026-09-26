@@ -190,10 +190,12 @@ class ValueSlider(QWidget):
 
 
 class DropCard(QFrame):
-    """A big 'drop a file here / click to choose' card with a status line."""
+    """A big 'drop a file here / click to choose' card with a status line,
+    and a ✕ (plus a right-click menu) to remove what it holds."""
 
     clicked = Signal()
     dropped = Signal(list)
+    remove = Signal(object, bool)    # where (global QPoint), from the ✕ (not right-click)
 
     def __init__(self, icon, title, hint, parent=None):
         super().__init__(parent)
@@ -216,8 +218,31 @@ class DropCard(QFrame):
         lay.addLayout(col, 1)
         self.extra = QHBoxLayout()
         lay.addLayout(self.extra)
+        self.remove_btn = button("✕", "Remove", flat=True,
+                                 slot=lambda: self.remove.emit(self.remove_btn.mapToGlobal(
+                                     self.remove_btn.rect().bottomLeft()), True))
+        self.remove_btn.setFixedSize(30, 30)
+        self.remove_btn.setVisible(False)
+        self.extra.addWidget(self.remove_btn)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.remove_btn.isVisible() and self.remove.emit(self.mapToGlobal(pos),
+                                                                          False))
+        self._defaults = (title, hint)
         self._hover = False
         self.progress = 0.0
+
+    def reset(self):
+        """Back to the empty 'drop a file here' state."""
+        self.title.setText(self._defaults[0])
+        self.status.setText(self._defaults[1])
+        self.progress = 0.0
+        self.set_removable(False)
+        self.update()
+
+    def set_removable(self, on: bool, tip: str = "Remove"):
+        self.remove_btn.setToolTip(tip)
+        self.remove_btn.setVisible(on)
 
     def set_state(self, title=None, status=None, progress=None):
         if title is not None:
