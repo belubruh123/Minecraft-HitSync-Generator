@@ -240,9 +240,39 @@ class ProjectTests(unittest.TestCase):
         self.assertIsNone(p.timeline())
         self.assertAlmostEqual(p.sync.drop_time, drop1, delta=0.02)
         self.assertEqual(p.sync.bpm_override, 0.0)
-        self.assertFalse(p.remove_song(0))                     # the last one stays
         p.recalculate()
         self.assertGreater(p.schedule.duration, 0)
+        # removing the only song leaves no music
+        self.assertTrue(p.remove_song(0))
+        self.assertEqual((p.music_path, p.extra_music), ("", []))
+        self.assertIsNone(p.audio)
+        self.assertIsNone(p.schedule)
+        self.assertEqual(p.markers.beats, [])
+        self.assertEqual(p.music_duration, 0.0)
+        self.assertFalse(p.remove_song(0))
+        # dropping it again brings it back from the cache
+        p.music_path = one
+        self.assertEqual(p.analyze(), (True, False))
+        self.assertAlmostEqual(p.sync.drop_time, drop1, delta=0.02)
+        self.assertGreater(p.recalculate().duration, 0)
+
+    def test_type_or_pick_a_tempo(self):
+        p = self.fresh()
+        choices = p.tempo_choices(0)
+        self.assertTrue(choices)
+        self.assertTrue(all(abs(c / p.grid_bpm - 1) > 0.015 for c in choices))
+        p.set_song_bpm(55.0, 0)                                # half of 110
+        self.assertAlmostEqual(p.grid_bpm, 55.0, places=3)
+        beats = np.asarray(p.markers.beats)
+        self.assertAlmostEqual(np.median(np.diff(beats[beats < p.timeline().handovers[0]])),
+                               60 / 55.0, places=3)
+        p.set_song_bpm(64.0, 1)                                # song 2: half of 128
+        T = p.timeline().handovers[0]
+        beats = np.asarray(p.markers.beats)
+        self.assertAlmostEqual(np.median(np.diff(beats[beats > T])), 60 / 64.0, places=3)
+        p.reset_grid(0)
+        p.reset_grid(1)
+        self.assertAlmostEqual(p.grid_bpm, 110.0, delta=0.05)
 
     def test_cuts_and_order_are_saved(self):
         from hitsync.project import Project

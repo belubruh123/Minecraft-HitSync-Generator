@@ -87,6 +87,68 @@ class GridTests(unittest.TestCase):
         self.assertTrue(abs(ratio - 1) < 1e-3 or abs(ratio - 0.5) < 1e-3, ma.grid.bpm)
         self.assertLess(np.abs(grid_error(beats, info)).max() * 1000, 5.0)
 
+    def test_syncopated_pop_without_a_backbeat(self):
+        # Shape-of-You-like songs where no clap marks beats 2 and 4: the 3-3-2
+        # riff used to win at 1.5x (134-144 BPM) or 2x
+        for kw in (dict(), dict(kick_pattern="dancehall"), dict(intro_bars=16),
+                   dict(mastered=True, seed=3), dict(bpm=100, seed=2),
+                   dict(bpm=92, kick_pattern="dancehall", mastered=True, seed=4)):
+            with self.subTest(**kw):
+                ma, beats, *_, info = analyse(sm.pop_syncopated_like, **kw)
+                # these imitations are played loosely (8-20 ms timing wobble)
+                self.assertOnBeats(ma, beats, info, ms=20.0)
+                self.assertFalse(ma.grid.drift)
+
+    def test_reggaeton_phonk_and_trap(self):
+        for fn, ok in ((sm.dembow_like, (1.0,)), (sm.phonk_like, (1.0,)),
+                       (sm.trap_triplet_like, (1.0, 0.5))):
+            with self.subTest(fn.__name__):
+                ma, beats, *_, info = analyse(fn)
+                ratio = ma.grid.bpm / info["bpm"]
+                self.assertTrue(any(abs(ratio - r) < 1e-3 for r in ok), ma.grid.bpm)
+                self.assertFalse(ma.grid.drift)
+
+    def test_never_a_triplet_or_dotted_tempo(self):
+        # whatever the style and tempo: the beat or its double / half, never
+        # 2/3, 3/4, 4/3 or 3/2 of it (those put every other hit off the beat)
+        rng = np.random.default_rng(7)
+        for fn, lo, hi in ((sm.pop_syncopated_like, 86, 112), (sm.dembow_like, 88, 100),
+                           (sm.phonk_like, 120, 145), (sm.trap_triplet_like, 130, 155)):
+            bpm = float(rng.uniform(lo, hi))
+            with self.subTest(fn.__name__, bpm=bpm):
+                y, info = fn(bpm=bpm, duration=60.0)
+                ratio = music_grid.analyze(y).grid.bpm / bpm
+                self.assertTrue(any(abs(ratio - r) < 3e-3 for r in (0.5, 1.0, 2.0)), ratio)
+
+    def test_candidates_start_with_the_chosen_tempo(self):
+        ma, *_ = analyse(sm.pop_syncopated_like)
+        self.assertAlmostEqual(ma.grid.candidates[0][0], ma.grid.bpm, delta=0.05)
+        self.assertGreater(len(ma.grid.candidates), 1)
+
+    def test_typed_tempo_keeps_the_beat(self):
+        # a typed tempo is fitted again; on a syncopated song that fit could
+        # land half a beat off, so the detected bar lines decide
+        import tempfile
+
+        from hitsync.audio_analysis import analyze_audio
+        from hitsync.ffmpeg_utils import find_ffmpeg
+
+        if not find_ffmpeg():
+            self.skipTest("ffmpeg unavailable")
+        y, info = sm.pop_syncopated_like(mastered=True, seed=3, duration=90.0)
+        path = os.path.join(tempfile.mkdtemp(), "s.wav")
+        sm.write_wav(path, y)
+        a = analyze_audio(path)
+        P = 60.0 / info["bpm"]
+        true = info["first_beat"] + P * np.arange(int((a.duration - 1) / P))
+        true = true[true > info["kick_in"]]
+        for bpm in (96.0, 96.02, 192.0):
+            with self.subTest(bpm=bpm):
+                beats = a.grid_for(bpm).beats(a.duration)
+                # every real beat has a grid beat on it (192: plus the "and"s)
+                miss = np.array([np.min(np.abs(beats - t)) for t in true])
+                self.assertLess(np.median(miss) * 1000, 10.0)
+
     def test_wandering_live_tempo_is_flagged(self):
         ma, *_ = analyse(sm.backbeat_like, drift=0.03, duration=90)
         self.assertTrue(ma.grid.drift)

@@ -69,10 +69,15 @@ class AudioAnalysis:
         g = self.grid
         if bpm > 0 and abs(bpm - g.bpm) > 1e-6:
             forced = music_grid.grid_with_tempo(self.onsets, self.drum_w, self.duration, bpm)
-            # keep the detected bar lines: the downbeat nearest the original one
+            # keep the detected bar lines: of the fitted phase and the one half
+            # a beat away (a syncopated riff fits both), the one that puts a
+            # beat on the detected downbeat; then the downbeat nearest it
             first_db = g.phase + g.period * g.downbeat
-            k = int(round((first_db - forced.phase) / forced.period)) % 4
-            g = Grid(forced.bpm, forced.phase, k, forced.confidence, False, g.candidates)
+            P = forced.period
+            phase = min((forced.phase, (forced.phase + P / 2) % P),
+                        key=lambda ph: abs(((first_db - ph) / P + 0.5) % 1 - 0.5))
+            k = int(round((first_db - phase) / P)) % 4
+            g = Grid(forced.bpm, phase, k, forced.confidence, False, g.candidates)
         if offset:
             P = g.period
             shifted = g.phase + offset

@@ -175,6 +175,129 @@ def halftime_like(duration=60.0, bpm=140.0, first_beat=0.12, seed=3):
     return _finish(y), info
 
 
+
+def pop_syncopated_like(duration=120.0, bpm=96.0, first_beat=0.37, seed=0, claps=0.0,
+                        kick_pattern="tresillo", vocals=True, intro_bars=8, jitter=0.008,
+                        mastered=False):
+    """A harder Shape-of-You-like song: the 3-3-2 marimba riff (a little
+    loose in time), vocal-like notes on random 16ths, a 3-3-2 ("tresillo")
+    or dancehall kick and quiet or no claps on 2 & 4, so no backbeat marks
+    the beat."""
+    rng = np.random.default_rng(seed)
+    y = np.zeros(int(duration * SR))
+    beat = 60.0 / bpm
+    s16 = beat / 4
+    bars = int((duration - first_beat) / (4 * beat))
+    kicks = (0, 3, 6, 8, 11, 14) if kick_pattern == "tresillo" else (0, 6, 8, 14)
+    for b in range(bars):
+        t0 = first_beat + b * 4 * beat
+        chord = CHORDS[b % 4]
+        for k, pos in enumerate((0, 3, 6, 8, 11, 14)):
+            _add(y, tone(chord[k % 3] * 2, 0.25, 0.22 * rng.uniform(0.7, 1.1), decay=14),
+                 t0 + pos * s16 + rng.normal(0, jitter))
+        if vocals and b >= 4:
+            for pos in sorted(rng.choice(16, size=int(rng.integers(4, 9)), replace=False)):
+                _add(y, tone(rng.choice(chord) * rng.choice([1, 2]), rng.uniform(0.1, 0.35), 0.16,
+                             decay=4, harmonics=(1.0, 0.6, 0.4, 0.2)),
+                     t0 + pos * s16 + rng.normal(0, 0.02))
+        if b >= intro_bars:
+            for pos in kicks:
+                _add(y, kick(0.7 if pos in (0, 8) else 0.5), t0 + pos * s16 + rng.normal(0, jitter / 2))
+            if claps:
+                for pos in (4, 12):
+                    _add(y, clap(rng, claps), t0 + pos * s16 + rng.normal(0, jitter / 2))
+            _add(y, tone(chord[0] / 2, 4 * beat, 0.18, decay=0.8, harmonics=(1.0,)), t0)
+        if b >= 24:
+            _pad(y, t0, 4 * beat, chord, 0.05)
+    info = dict(bpm=bpm, first_beat=first_beat, kick_in=first_beat + intro_bars * 4 * beat,
+                drop=first_beat + max(24, intro_bars) * 4 * beat)
+    return (master(y, seed) if mastered else _finish(y)), info
+
+
+def dembow_like(duration=90.0, bpm=95.0, first_beat=0.2, seed=4):
+    """Reggaeton: kick on every beat, the dembow snare on 16ths 3 6 11 14."""
+    rng = np.random.default_rng(seed)
+    y = np.zeros(int(duration * SR))
+    beat = 60.0 / bpm
+    s16 = beat / 4
+    bars = int((duration - first_beat) / (4 * beat))
+    for b in range(bars):
+        t0 = first_beat + b * 4 * beat
+        chord = CHORDS[b % 4]
+        for pos in (0, 4, 8, 12):
+            _add(y, kick(0.8), t0 + pos * s16)
+        for pos in (3, 6, 11, 14):
+            _add(y, clap(rng, 0.35), t0 + pos * s16)
+        for pos in range(0, 16, 2):
+            _add(y, hat(rng, 0.07), t0 + pos * s16)
+        for pos in (0, 3, 6, 8, 11, 14):
+            _add(y, tone(chord[0] / 2, 0.2, 0.2, decay=6, harmonics=(1.0, 0.3)), t0 + pos * s16)
+        _pad(y, t0, 4 * beat, chord, 0.04)
+    info = dict(bpm=bpm, first_beat=first_beat, kick_in=first_beat, drop=first_beat)
+    return _finish(y), info
+
+
+def phonk_like(duration=90.0, bpm=130.0, first_beat=0.15, seed=6):
+    """Drift phonk: a syncopated 16th cowbell riff, 808 kicks, a clap on 2
+    and 4 and rattling 16th hats."""
+    rng = np.random.default_rng(seed)
+    y = np.zeros(int(duration * SR))
+    beat = 60.0 / bpm
+    s16 = beat / 4
+    bars = int((duration - first_beat) / (4 * beat))
+    for b in range(bars):
+        t0 = first_beat + b * 4 * beat
+        chord = CHORDS[(b // 2) % 4]
+        for k, pos in enumerate((0, 3, 6, 8, 10, 11, 14)):
+            _add(y, tone(chord[k % 3] * 3, 0.12, 0.2, decay=25, harmonics=(1.0, 0.8, 0.5, 0.3)),
+                 t0 + pos * s16)
+        if b >= 4:
+            for pos in (0, 7, 10):
+                _add(y, kick(0.85), t0 + pos * s16)
+                _add(y, tone(chord[0] / 4, 0.4, 0.25, decay=3, harmonics=(1.0,)), t0 + pos * s16)
+            for pos in (4, 12):
+                _add(y, clap(rng, 0.4), t0 + pos * s16)
+            for pos in range(16):
+                _add(y, hat(rng, 0.05 if pos % 2 else 0.08), t0 + pos * s16)
+    info = dict(bpm=bpm, first_beat=first_beat, kick_in=first_beat + 4 * 4 * beat,
+                drop=first_beat + 4 * 4 * beat)
+    return _finish(y), info
+
+
+def trap_triplet_like(duration=80.0, bpm=140.0, first_beat=0.1, seed=8):
+    """Trap: half-time snare (beat 3), sparse 808 kicks and hi-hats in 8th
+    note triplets with rolls: reads as 140 or 70."""
+    rng = np.random.default_rng(seed)
+    y = np.zeros(int(duration * SR))
+    beat = 60.0 / bpm
+    bars = int((duration - first_beat) / (4 * beat))
+    for b in range(bars):
+        t0 = first_beat + b * 4 * beat
+        for pos in (0.0, 1.5, 2.75):
+            _add(y, kick(0.85), t0 + pos * beat)
+        _add(y, clap(rng, 0.5), t0 + 2 * beat)
+        for k in range(12):                                  # 8th-note triplets
+            _add(y, hat(rng, 0.09 if k % 3 == 0 else 0.06), t0 + k * beat / 3)
+        if b % 2:                                            # a 32nd roll
+            for k in range(8):
+                _add(y, hat(rng, 0.05), t0 + 3 * beat + k * beat / 8)
+        _pad(y, t0, 4 * beat, CHORDS[b % 4], 0.04)
+    info = dict(bpm=bpm, first_beat=first_beat, kick_in=first_beat, drop=first_beat)
+    return _finish(y), info
+
+
+def master(y, seed=0):
+    """Like a released track: a short room reverb and a soft limiter."""
+    from scipy.signal import fftconvolve
+
+    rng = np.random.default_rng(seed + 100)
+    n = int(0.35 * SR)
+    ir = rng.standard_normal(n) * np.exp(-_t(n) * 14) * 0.05
+    ir[0] = 1.0
+    y = fftconvolve(y, ir)[: len(y)]
+    y = y / max(1e-6, np.percentile(np.abs(y), 99.5))
+    return _finish(np.tanh(1.8 * y))
+
 def _finish(y):
     y = y / max(1e-6, np.abs(y).max()) * 0.9
     return y.astype(np.float32)

@@ -15,14 +15,15 @@ import time
 import traceback
 
 import numpy as np
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
-                               QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
-                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter,
-                               QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
+                               QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMenu,
+                               QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+                               QSlider, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
+                               QWidget)
 
-from .. import styles
+from .. import __version__, styles
 from ..project import Project, default_output_path
 from . import theme
 from .advanced import AdvancedDialog
@@ -49,7 +50,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         from ..preview_engine import PreviewEngine
 
-        self.setWindowTitle("Hit-Sync · Minecraft PvP montage maker")
+        self.setWindowTitle(f"Hit-Sync {__version__.rsplit('.', 1)[0]} · "
+                            "Minecraft PvP montage maker")
         self.setAcceptDrops(True)
         self.settings = QSettings("HitSync", "HitSync")
         self.project = Project.new()
@@ -113,6 +115,7 @@ class MainWindow(QMainWindow):
         self.music_card = DropCard("🎵", "Music", "Drop a song here (more songs play back to back)")
         self.music_card.clicked.connect(self.pick_music)
         self.music_card.dropped.connect(self.drop_files)
+        self.music_card.remove.connect(self._music_remove)
         bar.addWidget(self.video_card, 3)
         bar.addWidget(self.music_card, 3)
         style_box = QVBoxLayout()
@@ -132,8 +135,8 @@ class MainWindow(QMainWindow):
         # --- info row: tempo check + music start choices + combos
         info = QHBoxLayout()
         info.setSpacing(6)
-        self.tempo_chip = button("Tempo –", "Beat looks off? Fix it in the Song tab", chip=True,
-                                 slot=lambda: self.set_mode("song"))
+        self.tempo_chip = button("Tempo –", "Click to check or change the tempo", chip=True,
+                                 slot=lambda: self._tempo_menu(0))
         info.addWidget(self.tempo_chip)
         info.addWidget(label("Music starts:", muted=True))
         chips = QWidget()
@@ -320,6 +323,7 @@ class MainWindow(QMainWindow):
         r2.addWidget(self.grid_lbl)
         r2.addWidget(label("  Beat looks off?", muted=True))
         for text, tip, fn in (
+                ("Type BPM", "Type the song's tempo", lambda: self._type_bpm()),
                 ("Tap (T)", "Tap along with the beat, 8 times or more", self.tap),
                 ("½×", "Half the tempo", lambda: self._grid_fix("half")),
                 ("2×", "Double the tempo", lambda: self._grid_fix("double")),
@@ -448,6 +452,10 @@ class MainWindow(QMainWindow):
             st = (f"{p.grid_bpm:.1f} BPM · {theme.fmt_short(p.music_duration)}"
                   if p.audio else "Analysing…")
             self.music_card.set_state(title, st)
+            self.music_card.set_removable(True, "Remove this song" if len(names) == 1
+                                          else "Remove a song, or all music")
+        else:
+            self.music_card.reset()
 
     # ========================================================== analysis
     def analyze(self):
@@ -618,8 +626,12 @@ class MainWindow(QMainWindow):
             self.tempo_chip.setStyleSheet(f"color: {theme.GOOD if ok else theme.WARN};")
             self.tempo_chip.setToolTip(
                 ("Tempo wanders (live band): following the drummer. " if g.drift else "") +
-                f"Detection confidence {g.confidence:.0%}. Beat looks off? Fix it in the "
-                "Song tab.")
+                f"Detection confidence {g.confidence:.0%}. Wrong tempo? Click to pick or "
+                "type the right one.")
+        else:
+            self.tempo_chip.setText("Tempo –")
+            self.tempo_chip.setStyleSheet("")
+            self.tempo_chip.setToolTip("Drop a song to find its tempo")
         # music start chips
         while self.start_chips.count():
             wdg = self.start_chips.takeAt(0).widget()
@@ -648,6 +660,9 @@ class MainWindow(QMainWindow):
                                  f" · {locked}/{len(placed)} hits on the beat · "
                                  f"{s.ref_bpm:.1f} BPM · beats per hit {s.beats_per_hit:g}"
                                  + (f" · ⚠ {s.warnings[0]}" if s.warnings else ""))
+        else:
+            self.combo_lbl.setText("")
+            self.summary.setText("")
         self._refresh_cards()
 
     def _refresh_plan(self):
@@ -936,10 +951,14 @@ class MainWindow(QMainWindow):
 
     def _songs_changed(self, message=""):
         self.engine.pause()
+        if self.project.audio is None and self.mode == "song":
+            self.mode = "montage"                    # no song left to show
+            self._update_mode_ui()
         self._refresh_song_list()
         self._refresh_cards()
         self._refresh_music_panel(force=True)
         self.recalc(now=True)
+        self.timeline.update()
         if self.mode == "song":
             self._song_view_update()
         self._load_program(keep=self.mode != "song")
@@ -970,11 +989,42 @@ class MainWindow(QMainWindow):
         if self._songs_busy():
             return
         k = self.song_index if k is None else k
+        if not 0 <= k < self.project.song_count:
+            return
         name = os.path.basename(self.project.music_paths[k])
         if self.project.remove_song(k):
             if self.song_index > k or self.song_index >= self.project.song_count:
                 self.song_index = max(0, self.song_index - 1)
-            self._songs_changed(f"Removed {name}")
+            self._songs_changed(f"Removed {name} (drop it again to bring it back)")
+
+    def _remove_all_music(self):
+        if self._songs_busy() or not self.project.music_path:
+            return
+        self.project.clear_music()
+        self.song_index = 0
+        self._songs_changed("Removed all music")
+
+    def _build_music_menu(self):
+        """✕ / right-click on the Music card: remove one song or all of them."""
+        p = self.project
+        if not p.music_path:
+            return None
+        m = QMenu(self)
+        for k, path in enumerate(p.music_paths):
+            m.addAction(f"Remove {os.path.basename(path)}",
+                        lambda k=k: self._remove_song(k))
+        if p.song_count > 1:
+            m.addSeparator()
+            m.addAction("Remove all music", self._remove_all_music)
+        return m
+
+    def _music_remove(self, where, from_button):
+        if from_button and self.project.song_count == 1:
+            self._remove_song(0)                     # one song: the ✕ just removes it
+            return
+        m = self._build_music_menu()
+        if m is not None:
+            m.exec(where)
 
     def _reset_cut(self, k):
         self.project.clear_song_end(k)
@@ -1040,9 +1090,10 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Tap {len(self.taps)}/8…")
 
-    def _grid_fix(self, what):
-        p, k = self.project, self.song_index
-        if p.audio is None:
+    def _grid_fix(self, what, k=None):
+        p = self.project
+        k = self.song_index if k is None else k
+        if p._song(k) is None:
             return
         if what == "half":
             p.set_tempo_factor(0.5, k)
@@ -1054,6 +1105,10 @@ class MainWindow(QMainWindow):
             p.reset_grid(k)
         else:
             p.nudge_grid(float(what), k)
+        self._grid_changed(k)
+
+    def _grid_changed(self, k):
+        p = self.project
         if k == 0:
             p.set_drop(p.sync.drop_time)
         p.auto_intro()
@@ -1062,6 +1117,55 @@ class MainWindow(QMainWindow):
         self._song_view_update()
         if self.mode == "song":
             self._load_program(keep=True)
+
+    # ---- tempo: pick one of the likely tempos, type it, or tap it
+    def _build_tempo_menu(self, k=0):
+        p = self.project
+        a = p._song(k)
+        if a is None:
+            return None
+        cur = p.song_grid(k)[2]
+        m = QMenu(self)
+        head = m.addAction(f"Now {cur:.1f} BPM · detection confidence {a.grid.confidence:.0%}")
+        head.setEnabled(False)
+        m.addSeparator()
+        for b in p.tempo_choices(k):
+            m.addAction(f"Use {b:.1f} BPM", lambda b=b: self._set_bpm(k, b))
+        m.addSeparator()
+        m.addAction("Type the BPM…", lambda: self._type_bpm(k))
+        m.addAction("Tap along…", lambda: self._tap_song(k))
+        if p._fix(k) != (0.0, 0.0):
+            m.addAction("Back to the detected tempo", lambda: self._grid_fix("reset", k))
+        return m
+
+    def _tempo_menu(self, k=0):
+        m = self._build_tempo_menu(k)
+        if m is None:
+            self.set_mode("song")
+            return
+        m.exec(self.tempo_chip.mapToGlobal(QPoint(0, self.tempo_chip.height())))
+
+    def _set_bpm(self, k, bpm):
+        self.project.set_song_bpm(bpm, k)
+        self._grid_changed(k)
+        self.statusBar().showMessage(f"Tempo set to {bpm:.2f} BPM"
+                                     + ("" if k == 0 else f" (song {k + 1})"), 5000)
+
+    def _type_bpm(self, k=None):
+        p = self.project
+        k = self.song_index if k is None else k
+        if p._song(k) is None:
+            return
+        name = os.path.basename(p.music_paths[k])
+        bpm, ok = QInputDialog.getDouble(self, "Tempo", f"BPM of {name}:", p.song_grid(k)[2],
+                                         40.0, 250.0, 2)
+        if ok and bpm > 0:
+            self._set_bpm(k, bpm)
+
+    def _tap_song(self, k):
+        self._song_selected(k)
+        self.statusBar().showMessage("Play the song and press T along with the beat "
+                                     "(8 taps or more).", 8000)
 
     def _song_bpm(self):
         p = self.project

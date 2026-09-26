@@ -30,8 +30,9 @@ That's it. Everything below is optional.
 
 ### The smart bar
 
-- **Tempo check** (e.g. `96.0 BPM ✓`): how sure the beat detection is. Click it
-  if the beat sounds off.
+- **Tempo check** (e.g. `96.0 BPM ✓`, or `?` when unsure): click it to pick one
+  of the other likely tempos (e.g. `Use 192.0 BPM`), **type the BPM**, or tap
+  along.
 - **Music starts**: the best guesses for where the song kicks in (e.g.
   `0:20 Beat kicks in`, `1:00 Big moment`). Click one to use it, or pick by
   ear (below).
@@ -63,6 +64,7 @@ beat. The fixes are in the Song tab:
 
 | Fix | What it does |
 |---|---|
+| Type BPM | You know the tempo: type it (the beat is fitted to it) |
 | Tap (T) | Tap along 8 times or more |
 | ½× / 2× | The tempo is half or double what it should be |
 | Shift ½ beat | The clicks sit between the beats |
@@ -131,8 +133,9 @@ stops: no gap, and the beat grid continues.
   bar (the last song plays to its end); **✂ Auto** goes back to that.
 - **Change the order**: drag the songs, or use ▲▼. The first song's start
   point is where the first combo hit lands.
-- **Remove a song**: ✕. Any song can go, the first one too, as long as one
-  song is left.
+- **Remove a song**: ✕ on the song, or ✕ / right-click on the Music card at
+  the top (with several songs it asks which one, or all). Any song can go,
+  the only one too; drop it again to bring it back.
 
 Nothing is analysed again: each song keeps its beat, start, cut and beat fixes
 when it moves.
@@ -212,14 +215,30 @@ directly:
 - **Tempo**: every candidate tempo folds the song's drum attacks onto a single
   beat. The true tempo is the one where they stack up over the whole song; a
   wrong one smears once the pattern repeats.
-- **Right multiple**: a tempo that is really the 8th-note level shows loud and
-  quiet beats alternating, so it loses to the real beat.
+- **Right multiple**: a syncopated riff (the 3-3-2 of *Shape of You*,
+  reggaeton, phonk cowbells, trap triplets) also folds well at 1.5×, 4/3 or 2×
+  the real tempo. So the related tempos of the best candidates are always
+  weighed too, and each is scored on:
+  - how well the attacks fold;
+  - a tempo prior;
+  - **bar repetition**: songs repeat every bar and every two bars, so the true
+    tempo's 4 and 8 beats line up with the song's own repetition, and a 1.5×
+    tempo's don't;
+  - a subdivision test: a tempo whose every other beat only has hats is the
+    8th-note level. Hit strength is compared by rank, so a clap counts like
+    an 808, and a song without a backbeat still keeps its beat.
 - **Phase**: the phase comes from the loud kick and snare accents, so off-beat
   hats can't flip it. It is then fitted to the attacks, which are measured on
-  the waveform to about ±1 ms.
+  the waveform to about ±1 ms. A riff that hits both the beats and the "and"s
+  is settled by where the louder attacks and the chord changes are.
 - **Downbeats**: the bar lines come from the kick plus chord changes.
-- **Live songs**: a song whose tempo wanders (a live band) is detected, and
-  the beat tracker follows it instead.
+- **Live songs**: a song whose tempo wanders (a live band) is detected by the
+  local tempo moving more than 2% through the song, and the beat tracker
+  follows it instead.
+
+On 48 synthetic songs of 8 styles at random tempos, 47 read the exact tempo
+and one read double (still every beat). Before this, 23 of them read a wrong
+tempo, such as a 3-3-2 song at 89.3 BPM read as 134.
 
 ### Music start (`sections.py`)
 

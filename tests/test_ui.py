@@ -301,7 +301,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(w.music_panel.list.count(), 1)
         rm = [b for b in w.music_panel.list.itemWidget(w.music_panel.list.item(0))
               .findChildren(type(w.cut_btn)) if b.text() == "✕"][0]
-        self.assertFalse(rm.isEnabled())                            # the last song stays
+        self.assertTrue(rm.isEnabled())                             # even the only song can go
         # back to the original song for the tests after this one
         w.drop_files([self.song])
         self.assertTrue(self.wait_idle())
@@ -359,6 +359,60 @@ class AppTests(unittest.TestCase):
         w.tl_btn.setChecked(False)
         w.resize(1300, 850)
         self.pump(0.2)
+
+    def test_9d_tempo_menu_and_removing_the_music(self):
+        from unittest import mock
+
+        from PySide6.QtWidgets import QInputDialog
+
+        w = self.w
+        p = w.project
+        drop = p.sync.drop_time
+        # the tempo chip offers the other likely tempos, typing and tapping
+        m = w._build_tempo_menu(0)
+        texts = [a.text() for a in m.actions()]
+        self.assertIn("Type the BPM…", texts)
+        self.assertIn("Tap along…", texts)
+        pick = next(a for a in m.actions() if a.text().startswith("Use 192"))
+        pick.trigger()
+        self.pump(0.3)
+        self.assertAlmostEqual(p.grid_bpm, 192.0, delta=0.1)
+        with mock.patch.object(QInputDialog, "getDouble", return_value=(96.0, True)):
+            w._type_bpm(0)
+        self.pump(0.3)
+        self.assertAlmostEqual(p.grid_bpm, 96.0, places=2)
+        self.assertIsNotNone(p.schedule)
+        back = next(a for a in w._build_tempo_menu(0).actions() if a.text().startswith("Back"))
+        back.trigger()
+        self.pump(0.3)
+        self.assertEqual(p.sync.bpm_override, 0.0)
+        # the Music card's ✕ removes the only song
+        self.assertTrue(w.music_card.remove_btn.isVisible())
+        w.music_card.remove_btn.click()
+        self.pump(0.3)
+        self.assertEqual(p.music_path, "")
+        self.assertIsNone(p.schedule)
+        self.assertFalse(w.music_card.remove_btn.isVisible())
+        self.assertEqual(w.music_card.title.text(), "Music")
+        self.assertEqual(w.tempo_chip.text(), "Tempo –")
+        self.assertEqual(w.music_panel.list.count(), 0)
+        self.assertIsNone(w.engine.program)
+        # and dropping it again brings it back (from the cache)
+        w.drop_files([self.song])
+        self.assertTrue(self.wait_idle())
+        self.assertAlmostEqual(p.sync.drop_time, drop, delta=0.02)
+        self.assertIsNotNone(p.schedule)
+        # with two songs the ✕ offers each one, or all
+        w.drop_files([self.song2])
+        self.assertTrue(self.wait_idle())
+        texts = [a.text() for a in w._build_music_menu().actions()]
+        self.assertEqual(texts[:2], ["Remove song.wav", "Remove song2.wav"])
+        self.assertIn("Remove all music", texts)
+        w._remove_all_music()
+        self.pump(0.3)
+        self.assertEqual((p.music_path, p.extra_music), ("", []))
+        w.drop_files([self.song])
+        self.assertTrue(self.wait_idle())
 
 
 if __name__ == "__main__":
