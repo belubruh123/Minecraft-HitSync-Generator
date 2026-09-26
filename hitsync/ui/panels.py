@@ -1,17 +1,19 @@
-"""Side panels: Combos (pick / order / lead-in / per-hit effects), Text
-(captions) and Effects (look, hit effects, transitions, fades, ranges)."""
+"""Side panels: Combos (pick / order / lead-in / focus / per-hit effects),
+Music (songs: order, cuts, remove), Text (captions) and Effects (look, hit
+effects, focus bars, transitions, fades, ranges)."""
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+                               QListWidgetItem,
+                               QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .. import effects as fx_mod
-from ..text_overlay import ANIMATIONS, STYLES as TEXT_STYLES
+from ..text_overlay import ANIMATIONS, LABELS as TEXT_LABELS, STYLES as TEXT_STYLES
 from . import theme
-from .widgets import Segmented, ValueSlider, button, label
+from .widgets import ElidedLabel, Segmented, ValueSlider, button, label, shrinkable
 
 
 def _scroll(inner: QWidget) -> QScrollArea:
@@ -22,8 +24,22 @@ def _scroll(inner: QWidget) -> QScrollArea:
     return sa
 
 
+def _fit_list(lst: QListWidget):
+    """Rows as wide as the panel (never a sideways scrollbar), scrolled
+    smoothly up and down."""
+    lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    lst.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+    lst.setResizeMode(QListView.Adjust)
+    lst.setSpacing(3)
+
+
+def _row_hint(row: QWidget) -> QSize:
+    # width 0: the list stretches every row to its own width
+    return QSize(0, row.sizeHint().height())
+
+
 def _section(lay, text):
-    lb = label(text.upper(), h2=True)
+    lb = label(text.upper(), h2=True, wrap=True)
     lb.setContentsMargins(0, 10, 0, 2)
     lay.addWidget(lb)
 
@@ -32,6 +48,7 @@ def _section(lay, text):
 class ComboRow(QFrame):
     toggled = Signal(float, bool)
     lead_toggled = Signal(float, bool)
+    focus_toggled = Signal(float, bool)
     fx_changed = Signal(list, object)          # hit indices, True/False
     selected = Signal(float)
     moved = Signal(float, int)                 # key, -1 up / +1 down
@@ -55,7 +72,7 @@ class ComboRow(QFrame):
         self.use.toggled.connect(lambda on: self.toggled.emit(self.key, on))
         top.addWidget(self.use)
         self.thumb = QLabel()
-        self.thumb.setFixedSize(88, 50)
+        self.thumb.setFixedSize(80, 45)
         self.thumb.setStyleSheet(f"background: {theme.PANEL}; border-radius: 4px;")
         if thumb is not None:
             self.set_thumb(thumb)
@@ -65,8 +82,9 @@ class ComboRow(QFrame):
         stars = "★" * max(1, int(round(ranks.get(choice.key, 0.0) * 3))) if ranks else ""
         t = label(f"#{n}  ×{len(hits)} hits  <span style='color:{theme.WARN}'>{stars}</span>")
         t.setTextFormat(Qt.RichText)
+        t.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         info.addWidget(t)
-        info.addWidget(label(f"at {theme.fmt_short(choice.key)} in the video", muted=True))
+        info.addWidget(ElidedLabel(f"at {theme.fmt_short(choice.key)} in the video", muted=True))
         top.addLayout(info, 1)
         ud = QVBoxLayout()
         ud.setSpacing(0)
@@ -77,17 +95,25 @@ class ComboRow(QFrame):
             ud.addWidget(b)
         top.addLayout(ud)
         lay.addLayout(top)
-        row = QHBoxLayout()
+        row = QGridLayout()                      # stacked, so it fits a narrow panel
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setVerticalSpacing(2)
         self.lead = QCheckBox("Slow-mo lead-in")
         self.lead.setToolTip("Show the footage before this combo in slow motion; the combo "
                              "still starts on the beat")
         self.lead.setChecked(choice.lead_in)
         self.lead.toggled.connect(lambda on: self.lead_toggled.emit(self.key, on))
-        row.addWidget(self.lead)
-        row.addStretch(1)
-        self.fx_btn = button("✦ Hit effects", "Choose which hits get zoom / shake / flash",
+        row.addWidget(self.lead, 0, 0)
+        self.focus = QCheckBox("🎬 Focus bars")
+        self.focus.setToolTip("Black bars at the top and bottom while this combo plays "
+                              "(a cinematic focus on it)")
+        self.focus.setChecked(choice.focus)
+        self.focus.toggled.connect(lambda on: self.focus_toggled.emit(self.key, on))
+        row.addWidget(self.focus, 1, 0)
+        self.fx_btn = button("✦ Effects", "Choose which hits get zoom / shake / flash",
                              flat=True, checkable=True)
-        row.addWidget(self.fx_btn)
+        row.addWidget(self.fx_btn, 0, 1, Qt.AlignRight)
+        row.setColumnStretch(0, 1)
         lay.addLayout(row)
         self.fx_box = QWidget()
         g = QGridLayout(self.fx_box)
@@ -99,18 +125,19 @@ class ComboRow(QFrame):
             b.setProperty("chip", True)
             b.setCheckable(True)
             b.setChecked(default_fx if h.fx is None else h.fx)
-            b.setFixedSize(40, 24)
+            b.setFixedSize(34, 24)
             b.setStyleSheet("padding: 0px;")
             b.toggled.connect(lambda on, i=i: self.fx_changed.emit([i], on))
-            g.addWidget(b, k // 7, k % 7)
+            g.addWidget(b, k // 6, k % 6)
             self.chips.append((i, b))
-        quick = QHBoxLayout()
-        for text, pick in (("All", lambda k, n: True), ("None", lambda k, n: False),
-                           ("Every 2nd", lambda k, n: k % 2 == 1),
-                           ("First && last", lambda k, n: k in (0, n - 1))):
-            quick.addWidget(button(text, flat=True, slot=lambda _=False, f=pick: self._quick(f)))
-        quick.addStretch(1)
-        g.addLayout(quick, (len(hits) + 6) // 7, 0, 1, 7)
+        quick = QGridLayout()
+        for j, (text, pick) in enumerate((("All", lambda k, n: True),
+                                          ("None", lambda k, n: False),
+                                          ("Every 2nd", lambda k, n: k % 2 == 1),
+                                          ("First && last", lambda k, n: k in (0, n - 1)))):
+            quick.addWidget(button(text, flat=True, slot=lambda _=False, f=pick: self._quick(f)),
+                            j // 2, j % 2)
+        g.addLayout(quick, (len(hits) + 5) // 6, 0, 1, 6)
         self.fx_box.setVisible(False)
         self.fx_btn.toggled.connect(self._expand)
         lay.addWidget(self.fx_box)
@@ -123,7 +150,7 @@ class ComboRow(QFrame):
     def parent_item_resize(self):
         item = getattr(self, "item", None)
         if item is not None:
-            item.setSizeHint(self.sizeHint())
+            item.setSizeHint(_row_hint(self))
 
     def _quick(self, pick):
         n = len(self.chips)
@@ -166,14 +193,13 @@ class CombosPanel(QWidget):
                              flat=True, slot=lambda: self.reset.emit()))
         top.addStretch(1)
         lay.addLayout(top)
-        self.hint = label("Drag to reorder · tick to use · ✦ choose hits for effects",
-                          muted=True, wrap=True)
+        self.hint = label("Drag to reorder · tick to use · 🎬 black bars on a combo · "
+                          "✦ choose hits for effects", muted=True, wrap=True)
         lay.addWidget(self.hint)
         self.list = QListWidget()
         self.list.setDragDropMode(QAbstractItemView.InternalMove)
         self.list.setDefaultDropAction(Qt.MoveAction)
-        self.list.setSpacing(3)
-        self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        _fit_list(self.list)
         self.list.model().rowsMoved.connect(self._rows_moved)
         lay.addWidget(self.list, 1)
         self.empty = label("Combos show up here after the video is analysed.", muted=True,
@@ -191,12 +217,13 @@ class CombosPanel(QWidget):
             row = ComboRow(n, c, hits, ranks, default_fx, self.thumbs.get(round(c.key, 3)))
             item = QListWidgetItem()
             item.setData(Qt.UserRole, c.key)
-            item.setSizeHint(row.sizeHint())
+            item.setSizeHint(_row_hint(row))
             row.item = item
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
             row.toggled.connect(self._toggled)
             row.lead_toggled.connect(self._lead)
+            row.focus_toggled.connect(self._focus)
             row.fx_changed.connect(self.fx_changed.emit)
             row.selected.connect(self.select.emit)
             row.moved.connect(self._move)
@@ -225,6 +252,12 @@ class CombosPanel(QWidget):
             c.lead_in = on
             self.plan_changed.emit(list(self.choices))
 
+    def _focus(self, key, on):
+        c = self._by_key(key)
+        if c:
+            c.focus = on
+            self.plan_changed.emit(list(self.choices))
+
     def _move(self, key, d):
         i = next((k for k, c in enumerate(self.choices) if abs(c.key - key) < 1e-6), None)
         if i is None or not 0 <= i + d < len(self.choices):
@@ -239,6 +272,116 @@ class CombosPanel(QWidget):
         self.plan_changed.emit(list(self.choices))
 
 
+# ================================================================== music
+class SongRow(QFrame):
+    """One song of the soundtrack: name, tempo, where it starts and where it
+    switches to the next song, with move / delete / cut-reset."""
+
+    selected = Signal(int)
+    moved = Signal(int, int)                   # song index, -1 up / +1 down
+    removed = Signal(int)
+    reset_cut = Signal(int)
+
+    def __init__(self, k, info: dict, can_remove: bool, current: bool):
+        super().__init__()
+        self.k = k
+        self.setProperty("card", True)
+        if current:
+            self.setStyleSheet(f"QFrame[card=\"true\"] {{ border: 1px solid {theme.ACCENT}; }}")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Click to listen to it in the Song view")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        handle = QLabel("⠿")
+        handle.setToolTip("Drag to change the order")
+        handle.setStyleSheet(f"color: {theme.MUTED}; font-size: 16px;")
+        top.addWidget(handle)
+        name = label(f"<b>{k + 1}.</b> {info['name']}")
+        name.setTextFormat(Qt.RichText)
+        name.setMinimumWidth(40)
+        name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        top.addWidget(name, 1)
+        for txt, d in (("▲", -1), ("▼", 1)):
+            b = button(txt, "Play earlier" if d < 0 else "Play later", flat=True,
+                       slot=lambda _=False, d=d: self.moved.emit(self.k, d))
+            b.setFixedSize(24, 22)
+            top.addWidget(b)
+        rm = button("✕", "Remove this song" if can_remove else
+                    "The only song: drop another song to replace it", flat=True,
+                    slot=lambda: self.removed.emit(self.k))
+        rm.setFixedSize(24, 22)
+        rm.setEnabled(can_remove)
+        top.addWidget(rm)
+        lay.addLayout(top)
+        lay.addWidget(ElidedLabel(info["detail"], muted=True))
+        row = QHBoxLayout()
+        self.cut_lbl = ElidedLabel(info["span"], muted=not info.get("cut_manual"))
+        self.cut_lbl.setToolTip(info["span"])
+        row.addWidget(self.cut_lbl, 1)
+        if info.get("cut_manual"):
+            row.addWidget(button("✂ Auto", "Back to the automatic end", flat=True,
+                                 slot=lambda: self.reset_cut.emit(self.k)))
+        lay.addLayout(row)
+
+    def mousePressEvent(self, e):
+        self.selected.emit(self.k)
+        super().mousePressEvent(e)
+
+
+class MusicPanel(QWidget):
+    """The soundtrack: songs in play order. Each one plays from its start
+    point (song 1: where the first hit lands) until its cut, where the next
+    song takes over on the beat."""
+
+    add = Signal()
+    select = Signal(int)
+    move = Signal(int, int)
+    order = Signal(list)               # new order of song indices (drag)
+    remove = Signal(int)
+    reset_cut = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.addWidget(button("＋ Add song", "Another song, played after the others",
+                             primary=True, slot=lambda: self.add.emit()))
+        lay.addWidget(label("Songs play top to bottom, each switching to the next one on the "
+                            "beat. Drag or ▲▼ to reorder. To cut a song: click it, play it, "
+                            "and press ✂ where the next song should take over.", muted=True,
+                            wrap=True))
+        self.list = QListWidget()
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list.setDefaultDropAction(Qt.MoveAction)
+        _fit_list(self.list)
+        self.list.model().rowsMoved.connect(self._rows_moved)
+        lay.addWidget(self.list, 1)
+        self.empty = label("Drop a song anywhere on the window.", muted=True, wrap=True)
+        lay.addWidget(self.empty)
+
+    def set_songs(self, infos, current: int):
+        self.list.clear()
+        self.empty.setVisible(not infos)
+        for k, info in enumerate(infos):
+            row = SongRow(k, info, len(infos) > 1, k == current)
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, k)
+            item.setSizeHint(_row_hint(row))
+            self.list.addItem(item)
+            self.list.setItemWidget(item, row)
+            row.selected.connect(self.select.emit)
+            row.moved.connect(self.move.emit)
+            row.removed.connect(self.remove.emit)
+            row.reset_cut.connect(self.reset_cut.emit)
+
+    def _rows_moved(self, *_):
+        order = [int(self.list.item(k).data(Qt.UserRole)) for k in range(self.list.count())]
+        if order != sorted(order):
+            self.order.emit(order)
+
+
 # ================================================================== text
 class TextRow(QFrame):
     changed = Signal()
@@ -246,9 +389,10 @@ class TextRow(QFrame):
     seek = Signal(float)
     set_time = Signal(object, str)          # item, "start" | "end"
 
-    def __init__(self, item):
+    def __init__(self, item, origin=lambda: 0.0):
         super().__init__()
         self.item = item
+        self.origin = origin                    # montage start (times shown from it)
         self.setProperty("card", True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
@@ -260,31 +404,32 @@ class TextRow(QFrame):
         top.addWidget(self.edit, 1)
         top.addWidget(button("✕", "Remove", flat=True, slot=lambda: self.removed.emit(item)))
         lay.addLayout(top)
-        row = QHBoxLayout()
         self.pos = Segmented([("top", "Top"), ("center", "Center"), ("bottom", "Bottom")])
         self.pos.set(item.position)
         self.pos.changed.connect(lambda v: self._set("position", v))
-        row.addWidget(self.pos)
-        self.style = QComboBox()
+        lay.addWidget(self.pos, 0, Qt.AlignLeft)
+        row = QHBoxLayout()                      # style + animation, shrink to fit
+        self.style = shrinkable(QComboBox())
         for s in TEXT_STYLES:
-            self.style.addItem(s.capitalize(), s)
+            self.style.addItem(TEXT_LABELS.get(s, s.capitalize()), s)
         self.style.setCurrentIndex(max(0, self.style.findData(item.style)))
         self.style.currentIndexChanged.connect(lambda _: self._set("style", self.style.currentData()))
-        row.addWidget(self.style)
-        self.anim = QComboBox()
+        row.addWidget(self.style, 3)
+        self.anim = shrinkable(QComboBox(), 6)
         for a in ANIMATIONS:
             self.anim.addItem(a.capitalize(), a)
         self.anim.setCurrentIndex(max(0, self.anim.findData(item.animation)))
         self.anim.currentIndexChanged.connect(lambda _: self._set("animation", self.anim.currentData()))
-        row.addWidget(self.anim)
+        row.addWidget(self.anim, 2)
         lay.addLayout(row)
         tr = QHBoxLayout()
-        tr.addWidget(button("⇤ Start here", "Start at the playhead", flat=True,
+        tr.addWidget(button("⇤ Start", "Start at the playhead", flat=True,
                             slot=lambda: self.set_time.emit(item, "start")))
-        self.times = label("", muted=True)
+        self.times = ElidedLabel("", muted=True)
+        self.times.setAlignment(Qt.AlignCenter)
         self.times.setCursor(Qt.PointingHandCursor)
-        tr.addWidget(self.times, 1, Qt.AlignCenter)
-        tr.addWidget(button("End here ⇥", "End at the playhead", flat=True,
+        tr.addWidget(self.times, 1)
+        tr.addWidget(button("End ⇥", "End at the playhead", flat=True,
                             slot=lambda: self.set_time.emit(item, "end")))
         lay.addLayout(tr)
         self.size = ValueSlider("Size", 0.5, 2.0, item.size, "{:.2f}", label_width=40)
@@ -293,7 +438,9 @@ class TextRow(QFrame):
         self.refresh()
 
     def refresh(self):
-        self.times.setText(f"{theme.fmt_time(self.item.start)} → {theme.fmt_time(self.item.end)}")
+        o = self.origin()
+        self.times.setText(f"{theme.fmt_time(self.item.start - o)} → "
+                           f"{theme.fmt_time(self.item.end - o)}")
 
     def _text(self, t):
         self.item.text = t
@@ -329,6 +476,7 @@ class TextPanel(QWidget):
         self.lay.addStretch(1)
         outer.addWidget(_scroll(inner), 1)
         self.rows = []
+        self.origin = 0.0                        # montage start, in music time
 
     def set_items(self, items):
         for r in self.rows:
@@ -336,7 +484,7 @@ class TextPanel(QWidget):
             r.deleteLater()
         self.rows = []
         for it in items:
-            r = TextRow(it)
+            r = TextRow(it, lambda: self.origin)
             r.changed.connect(self.changed.emit)
             r.removed.connect(self._remove)
             r.seek.connect(self.seek.emit)
@@ -374,11 +522,11 @@ class EffectsPanel(QWidget):
 
         _section(lay, "Flashy effects on part of the montage")
         add = QHBoxLayout()
-        self.kind = QComboBox()
+        self.kind = shrinkable(QComboBox())
         for k in fx_mod.RANGE_KINDS:
             self.kind.addItem(fx_mod.RANGE_LABELS[k], k)
         add.addWidget(self.kind, 1)
-        self.where = QComboBox()
+        self.where = shrinkable(QComboBox())
         for text, v in (("4 bars from playhead", "4"), ("8 bars from playhead", "8"),
                         ("The combo at the playhead", "combo"), ("Playhead to the end", "end")):
             self.where.addItem(text, v)
@@ -395,8 +543,10 @@ class EffectsPanel(QWidget):
         self._slider(lay, "Screen shake", "render", "hit_shake", 0, 1, percent=True)
         self._slider(lay, "Flash", "render", "hit_flash", 0, 1, percent=True)
         self._slider(lay, "RGB split", "render", "hit_rgb", 0, 1, percent=True)
-        self._check(lay, "Every hit gets effects unless unticked", "render", "hit_fx_default")
-        self._slider(lay, "Velocity (slow on impact)", "sync", "velocity", 0, 0.9, percent=True)
+        self._check(lay, "Effects on every hit", "render", "hit_fx_default",
+                    "Every hit gets the effects unless you untick it in Combos ✦")
+        self._slider(lay, "Velocity", "sync", "velocity", 0, 0.9, percent=True,
+                     tip="Slow on each impact, fast in between (hits stay on the beat)")
 
         _section(lay, "Look")
         self._choice(lay, "Filter", "render", "filter",
@@ -406,15 +556,25 @@ class EffectsPanel(QWidget):
         self._slider(lay, "Vignette", "render", "vignette", 0, 1, percent=True)
         self._slider(lay, "Bar pulse", "render", "beat_pulse", 0, 1, percent=True)
 
+        _section(lay, "Focus bars (black bars top and bottom)")
+        self._choice(lay, "Automatic", "sync", "letterbox_mode",
+                     [("slowmo", "Slow-mo parts"), ("first combo", "Intro + 1st combo"),
+                      ("combos", "Every combo"), ("off", "Off")])
+        lay.addWidget(label("Or tick 🎬 Focus bars on any combo in the Combos tab.",
+                            muted=True, wrap=True))
+
         _section(lay, "Between combos")
-        self._seg(lay, "sync", "transition", [(t, t.capitalize()) for t in fx_mod.TRANSITIONS])
+        self._choice(lay, "Transition", "sync", "transition",
+                     [(t, t.capitalize()) for t in fx_mod.TRANSITIONS])
 
         _section(lay, "Start and end")
-        self._seg(lay, "render", "fade_in", [("none", "No fade"), ("black", "From black"),
-                                             ("white", "Flash in")], "Start")
+        self._choice(lay, "Start", "render", "fade_in", [("none", "No fade"),
+                                                          ("black", "Fade from black"),
+                                                          ("white", "Flash in")])
         self._slider(lay, "Start fade (s)", "render", "fade_in_len", 0.1, 3.0, "{:.1f}")
-        self._seg(lay, "render", "fade_out", [("none", "Cut"), ("black", "To black"),
-                                              ("white", "To white")], "End")
+        self._choice(lay, "End", "render", "fade_out", [("none", "Cut"),
+                                                         ("black", "Fade to black"),
+                                                         ("white", "Fade to white")])
         self._slider(lay, "End fade (s)", "render", "fade_out_len", 0.2, 5.0, "{:.1f}")
         lay.addStretch(1)
         outer.addWidget(_scroll(inner), 1)
@@ -424,41 +584,31 @@ class EffectsPanel(QWidget):
         p = self.P()
         return p.render_params if which == "render" else p.sync
 
-    def _slider(self, lay, text, which, attr, lo, hi, fmt="{:.2f}", percent=False):
-        w = ValueSlider(text, lo, hi, 0, fmt, percent=percent, label_width=150)
+    def _slider(self, lay, text, which, attr, lo, hi, fmt="{:.2f}", percent=False, tip=""):
+        w = ValueSlider(text, lo, hi, 0, fmt, percent=percent, tip=tip, label_width=112)
         w.changed.connect(lambda v: self._push(which, attr, float(v)))
         lay.addWidget(w)
         self.controls.append((w, which, attr, "slider"))
 
-    def _check(self, lay, text, which, attr):
+    def _check(self, lay, text, which, attr, tip=""):
         w = QCheckBox(text)
+        w.setToolTip(tip)
         w.toggled.connect(lambda on: self._push(which, attr, bool(on)))
         lay.addWidget(w)
         self.controls.append((w, which, attr, "check"))
 
     def _choice(self, lay, text, which, attr, options):
         row = QHBoxLayout()
-        row.addWidget(QLabel(text))
-        w = QComboBox()
+        lb = QLabel(text)
+        lb.setFixedWidth(112)
+        row.addWidget(lb)
+        w = shrinkable(QComboBox())
         for v, t in options:
             w.addItem(t, v)
         w.currentIndexChanged.connect(lambda _: self._push(which, attr, w.currentData()))
         row.addWidget(w, 1)
         lay.addLayout(row)
         self.controls.append((w, which, attr, "combo"))
-
-    def _seg(self, lay, which, attr, options, text=None):
-        row = QHBoxLayout()
-        if text:
-            lb = QLabel(text)
-            lb.setMinimumWidth(40)
-            row.addWidget(lb)
-        w = Segmented(options)
-        w.changed.connect(lambda v: self._push(which, attr, v))
-        row.addWidget(w)
-        row.addStretch(1)
-        lay.addLayout(row)
-        self.controls.append((w, which, attr, "seg"))
 
     def _push(self, which, attr, value):
         if getattr(self, "_pulling", False):
@@ -476,10 +626,8 @@ class EffectsPanel(QWidget):
                     w.set(v)
                 elif kind == "check":
                     w.setChecked(bool(v))
-                elif kind == "combo":
-                    w.setCurrentIndex(max(0, w.findData(v)))
                 else:
-                    w.set(v)
+                    w.setCurrentIndex(max(0, w.findData(v)))
                 w.blockSignals(False)
         finally:
             self._pulling = False
@@ -487,10 +635,12 @@ class EffectsPanel(QWidget):
 
     def refresh_ranges(self):
         while self.ranges_box.count():
-            it = self.ranges_box.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
+            wdg = self.ranges_box.takeAt(0).widget()
+            if wdg is not None:
+                wdg.setParent(None)                  # gone now, not when Qt gets to it
+                wdg.deleteLater()
         p = self.P()
+        o = p.schedule.start if p.schedule is not None else 0.0     # montage clock
         for rg in list(p.effects):
             card = QFrame()
             card.setProperty("card", True)
@@ -498,9 +648,10 @@ class EffectsPanel(QWidget):
             v.setContentsMargins(8, 4, 8, 4)
             head = QHBoxLayout()
             name = label(f"<b>{fx_mod.RANGE_LABELS.get(rg.kind, rg.kind)}</b>  "
-                         f"<span style='color:{theme.MUTED}'>{theme.fmt_time(rg.start)} → "
-                         f"{theme.fmt_time(rg.end)}</span>")
+                         f"<span style='color:{theme.MUTED}'>{theme.fmt_time(rg.start - o)} → "
+                         f"{theme.fmt_time(rg.end - o)}</span>")
             name.setTextFormat(Qt.RichText)
+            name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             head.addWidget(name, 1)
             head.addWidget(button("▶", "Preview it", flat=True,
                                   slot=lambda _=False, r=rg: self.seek.emit(r.start)))
@@ -520,4 +671,4 @@ class EffectsPanel(QWidget):
         self.changed.emit("")
 
 
-__all__ = ["CombosPanel", "TextPanel", "EffectsPanel", "QSize"]
+__all__ = ["CombosPanel", "MusicPanel", "TextPanel", "EffectsPanel", "QSize"]

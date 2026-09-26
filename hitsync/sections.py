@@ -87,6 +87,12 @@ def detect(curve_t, level, bass, kick, snare, bars, duration) -> Sections:
     B = _bar_means(curve_t, bass, bars, duration)
     L = _bar_means(curve_t, level, bars, duration)
     n = len(bars)
+    bar_len = float(np.median(np.diff(bars)))
+    if duration - bars[-1] < 0.75 * bar_len:
+        # the song ends a little into its last bar: that bar's averages are
+        # just its first hit, not a louder bar
+        for arr in (K, S, B, L):
+            arr[-1] = arr[-2]
 
     # drums come in: first bar whose kick level holds for 4 bars after a quieter stretch
     k_hi = np.percentile(K, 85)
@@ -98,7 +104,9 @@ def detect(curve_t, level, bass, kick, snare, bars, duration) -> Sections:
             break
 
     scores = np.zeros(n)
-    for i in range(1, n - 1):
+    # a start needs song after it (at least 4 bars): the last bars' rise is
+    # only the song ending
+    for i in range(1, n - 3):
         pre = slice(max(0, i - 4), i)
         post = slice(i, min(n, i + 8))
         rise = (1.0 * (K[post].mean() - K[pre].mean()) + 0.8 * (B[post].mean() - B[pre].mean())

@@ -71,8 +71,32 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(tl.duration, 30.0)
         self.assertTrue(np.allclose(tl.beats(), b))
 
+    def test_cut_songs(self):
+        b, d = grid(0.2, 0.5, 30.0)
+        # a single song cut at 20.2 s ends there, with a tiny de-click fade
+        tl = MusicTimeline([Song("a", 30.0, 0.0, 20.2, b, d, cut=True)])
+        self.assertAlmostEqual(tl.duration, 20.2)
+        self.assertTrue(0 < tl.pieces[0].fade_out <= 0.05)
+        self.assertLess(tl.beats().max(), 20.2 + 1e-6)
+        # the last of two songs, cut: the music ends at its cut
+        tl2, s1, s2 = self.make()
+        s2.end, s2.cut = float(s2.downbeats[20]), True
+        tl2 = MusicTimeline([s1, s2])
+        T = tl2.handovers[0]
+        self.assertAlmostEqual(tl2.duration, T + s2.end - s2.start)
+
 
 class ProjectTests(unittest.TestCase):
+    def fresh(self):
+        """A new project on the same files (analyses come from the cache)."""
+        from hitsync.project import Project
+
+        p = Project(video_path=self.video, music_path=self.songs[0][0])
+        p.sync.min_combo_len = 3
+        p.add_song(self.songs[1][0])
+        p.analyze()
+        return p
+
     @classmethod
     def setUpClass(cls):
         from hitsync.ffmpeg_utils import find_ffmpeg
@@ -152,6 +176,87 @@ class ProjectTests(unittest.TestCase):
         self.assertAlmostEqual(np.median(np.diff(after[after > T])), 2 * 60 / 128, places=3)
         p.reset_grid(song=1)
         self.assertTrue(np.allclose(np.asarray(p.markers.beats), before))
+
+    def test_cut_song_one_switches_there(self):
+        p = self.fresh()
+        _, downs, _ = p.song_grid(0)
+        want = float(downs[np.searchsorted(downs, p.sync.drop_time + 8.0)])
+        got = p.set_song_end(0, want + 0.2)                   # snaps to the bar line
+        self.assertAlmostEqual(got, want, places=6)
+        self.assertEqual(p.song_end(0), (got, False))
+        self.assertAlmostEqual(p.timeline().handovers[0], got, places=6)
+        k, t = p.timeline().song_at(got + 0.01)
+        self.assertEqual(k, 1)
+        # the beat grid switches tempo right there
+        beats = np.asarray(p.markers.beats)
+        self.assertAlmostEqual(np.median(np.diff(beats[beats > got])), 60 / 128, places=3)
+        # too early (before the drop + a bar): refused
+        self.assertIsNone(p.set_song_end(0, p.sync.drop_time))
+        p.clear_song_end(0)
+        self.assertTrue(p.song_end(0)[1])
+        self.assertAlmostEqual(p.timeline().handovers[0], self.p.timeline().handovers[0])
+
+    def test_cut_last_song_ends_the_music(self):
+        p = self.fresh()
+        T = p.timeline().handovers[0]
+        start = p.song_start(1)
+        _, d2, _ = p.song_grid(1)
+        cut = float(d2[np.searchsorted(d2, start + 10.0)])
+        self.assertAlmostEqual(p.set_song_end(1, cut), cut)
+        self.assertAlmostEqual(p.music_duration, T + cut - start, places=4)
+        self.assertLessEqual(max(p.markers.beats), p.music_duration + 1e-6)
+        # a single song can be cut too
+        p.remove_song(1)
+        self.assertIsNone(p.timeline())
+        full = p.music_duration
+        _, d1, _ = p.song_grid(0)
+        c1 = float(d1[np.searchsorted(d1, p.sync.drop_time + 6.0)])
+        p.set_song_end(0, c1)
+        self.assertIsNotNone(p.timeline())
+        self.assertAlmostEqual(p.music_duration, c1, places=4)
+        self.assertLess(p.music_duration, full)
+
+    def test_reorder_and_remove_the_first_song(self):
+        p = self.fresh()
+        one, two = self.songs[0][0], self.songs[1][0]
+        a1, a2 = p.audio, p.extra_audio[0]
+        drop1 = p.sync.drop_time
+        p.set_tempo_factor(0.5, song=1)                        # a beat fix on song 2
+        start2 = p.song_start(1)
+        self.assertEqual(p.move_song(1, -1), 0)
+        self.assertEqual(p.music_paths, [two, one])
+        self.assertIs(p.audio, a2)                             # analyses move along
+        self.assertIs(p.extra_audio[0], a1)
+        self.assertEqual(p.stale(), (False, False))            # nothing to re-analyse
+        self.assertAlmostEqual(p.sync.drop_time, start2, delta=0.02)
+        self.assertAlmostEqual(p.song_start(1), drop1, delta=0.02)
+        self.assertGreater(p.sync.bpm_override, 0)             # the fix came along
+        self.assertEqual(p.grid_fix, {})
+        self.assertAlmostEqual(p.grid_bpm, 64.0, delta=0.1)
+        # delete the (new) first song: song 2 becomes the only one
+        self.assertTrue(p.remove_song(0))
+        self.assertEqual(p.music_paths, [one])
+        self.assertIs(p.audio, a1)
+        self.assertIsNone(p.timeline())
+        self.assertAlmostEqual(p.sync.drop_time, drop1, delta=0.02)
+        self.assertEqual(p.sync.bpm_override, 0.0)
+        self.assertFalse(p.remove_song(0))                     # the last one stays
+        p.recalculate()
+        self.assertGreater(p.schedule.duration, 0)
+
+    def test_cuts_and_order_are_saved(self):
+        from hitsync.project import Project
+
+        p = self.fresh()
+        _, downs, _ = p.song_grid(0)
+        cut = p.set_song_end(0, float(downs[np.searchsorted(downs, p.sync.drop_time + 8.0)]))
+        p.move_song(0, 1)
+        path = os.path.join(tempfile.mkdtemp(), "p.json")
+        p.save(path)
+        q = Project.load(path)
+        self.assertEqual(q.music_paths, p.music_paths)
+        self.assertEqual(q.extra_ends, [cut])
+        self.assertAlmostEqual(q.music_duration, p.music_duration, places=6)
 
 
 if __name__ == "__main__":

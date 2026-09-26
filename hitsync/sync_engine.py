@@ -138,9 +138,9 @@ class Schedule:
         return sorted((p for p in self.placements if p.out_t is not None), key=lambda p: p.out_t)
 
     def letterbox_amount(self, t: float) -> float:
+        """0..1 bars at output time t (the spans decide: automatic bars and
+        per-combo focus bars)."""
         p = self.params
-        if not p.letterbox_enabled or p.letterbox_mode == "off":
-            return 0.0
         fade = max(1e-3, p.letterbox_fade)
         amt = 0.0
         snaps = self.letterbox_snap or [False] * len(self.letterbox)
@@ -209,8 +209,9 @@ class SyncEngine:
     def __init__(self, markers: Markers, params: SyncParams, video_duration: float,
                  music_duration: float, plan: Optional[Sequence] = None,
                  downbeats: Optional[Sequence[float]] = None):
-        """``plan``: ordered [(hit indices, slow-mo lead-in?)] of the combos to
-        use; None = every real combo, in time order, after "combat begins"."""
+        """``plan``: ordered [(hit indices, slow-mo lead-in?[, focus bars?])] of
+        the combos to use; None = every real combo, in time order, after
+        "combat begins"."""
         self.m = markers
         self.p = params
         # Static beat: every grid step from the drop to the end holds exactly
@@ -224,8 +225,9 @@ class SyncEngine:
         self.beats = beatgrid.extended_beats(beats, 0.0, self.music_duration + 5.0)
         groups = markers.combos()
         self.kept = [g for g in groups if len(g) >= max(1, params.min_combo_len)]
-        self.plan = None if plan is None else [(list(g), bool(lead)) for g, lead in plan if g]
-        used = [g for g, _ in self.plan] if self.plan is not None else self.kept
+        self.plan = None if plan is None else [
+            (list(e[0]), bool(e[1]), bool(e[2]) if len(e) > 2 else False) for e in plan if e[0]]
+        used = [e[0] for e in self.plan] if self.plan is not None else self.kept
         self.beat_period = float(np.median(np.diff(self.beats))) if len(self.beats) > 1 else 0.5
         self.hit_period = markers.typical_hit_period(used) or \
             markers.typical_hit_period() or self.beat_period
@@ -577,12 +579,12 @@ class SyncEngine:
 
     # ------------------------------------------------------------- build
     def _ordered_combos(self, hits, combat_from):
-        """[(hit indices, lead-in?)] in montage order."""
+        """[(hit indices, lead-in?, focus?)] in montage order."""
         if self.plan is not None:
-            return [(g, lead and k > 0) for k, (g, lead) in enumerate(self.plan)]
+            return [(g, lead and k > 0, focus) for k, (g, lead, focus) in enumerate(self.plan)]
         # a hit exactly at 'combat begins' is the first combat hit, not intro
         combos = [[i for i in grp if hits[i].t >= combat_from - 1e-3] for grp in self.kept]
-        return [(c, False) for c in combos if c]
+        return [(c, False, False) for c in combos if c]
 
     def build(self) -> Schedule:
         p = self.p
@@ -599,7 +601,7 @@ class SyncEngine:
         ordered = self._ordered_combos(hits, combat_from)
         # Only the chosen combos make the edit; every other hit is dead
         # footage the bridges cut straight through.
-        chosen = {i for g, _ in ordered for i in g}
+        chosen = {i for g, _, _ in ordered for i in g}
         for i in range(len(hits)):
             if i not in chosen:
                 placements[i].status = "dropped"
@@ -636,7 +638,7 @@ class SyncEngine:
                 first_already_placed = True
 
         post = 0.0  # the drop / video start has no combo tail to keep
-        for ci, (combo, lead_in) in enumerate(ordered):
+        for ci, (combo, lead_in, _) in enumerate(ordered):
             if out_t >= self.music_duration:
                 break
             if not (ci == 0 and first_already_placed):
@@ -679,7 +681,7 @@ class SyncEngine:
         end = min(self.music_duration, sched.segments[-1].out_end if sched.segments else 0.0)
         sched.duration = max(0.0, end - sched.start)
         self._clip_to(sched, end)
-        self._letterbox(sched, [g for g, _ in ordered], use_intro)
+        self._letterbox(sched, ordered, use_intro)
         sb = self.song_beats
         sched.beat_times = sb[(sb >= sched.start - EPS) & (sb <= sched.end + EPS)]
         db = self.downbeats
@@ -780,16 +782,22 @@ class SyncEngine:
             if pl.out_t is not None and pl.out_t > end:
                 pl.out_t, pl.locked, pl.status = None, False, "ignored"
 
-    def _letterbox(self, sched: Schedule, combos, use_intro: bool):
+    def _letterbox(self, sched: Schedule, ordered, use_intro: bool):
         """Cinematic bars.
 
-        ``slowmo`` (default): bars over the slow-mo intro and every slow-mo
-        lead-in; a quick white flash as each ends, and the bars are gone on
-        the first hit, so combos play full frame. ``first combo``: the intro
-        plus the first combo. ``combos``: every combo with enough hits.
+        Automatic bars (``letterbox_mode``): ``slowmo`` (default) puts bars
+        over the slow-mo intro and every slow-mo lead-in, with a quick white
+        flash as each ends, and the bars are gone on the first hit, so combos
+        play full frame. ``first combo``: the intro plus the first combo.
+        ``combos``: every combo with enough hits. ``off``: none.
+
+        Focus bars: any combo ticked "focus" gets bars over the whole combo,
+        whatever the mode. A slow-mo part right before it keeps its bars on
+        into the combo instead of dropping them on the first hit.
         """
         p = self.p
         mode = "off" if not p.letterbox_enabled else p.letterbox_mode
+        combos = [g for g, _, _ in ordered]
         spans, snaps = [], []
         slow = []
         if use_intro and sched.segments and sched.segments[0].kind == "intro":
@@ -802,21 +810,38 @@ class SyncEngine:
         if p.intro_flash:
             for a, b in slow:
                 sched.flashes.append((b, 0.8, 0.05, 0.16))
-        if mode in ("first combo", "first_combo") and combos:
-            outs = [sched.placements[i].out_t for i in combos[0]
+
+        def outs_of(grp):
+            return [sched.placements[i].out_t for i in grp
                     if sched.placements[i].out_t is not None]
+
+        if mode in ("first combo", "first_combo") and combos:
+            outs = outs_of(combos[0])
             if outs:
                 start = spans[0][0] if spans else max(0.0, min(outs) - p.letterbox_lead)
                 spans = [(start, max(outs) + p.letterbox_hold)] + spans[1:]
                 snaps = [False] + snaps[1:]
         if mode in ("combos", "all combos"):
             for grp in combos:
-                outs = [sched.placements[i].out_t for i in grp
-                        if sched.placements[i].out_t is not None]
+                outs = outs_of(grp)
                 if len(outs) < max(1, p.min_combo_hits):
                     continue
                 spans.append((max(0.0, min(outs) - p.letterbox_lead), max(outs) + p.letterbox_hold))
                 snaps.append(False)
+        for grp, _, focus in ordered:
+            outs = outs_of(grp) if focus else []
+            if not outs:
+                continue
+            # fully in by the first hit
+            a = max(0.0, min(outs) - max(p.letterbox_lead, p.letterbox_fade))
+            b = max(outs) + p.letterbox_hold
+            # the slow-mo part (intro / lead-in) that ends on this combo's first
+            # hit: bars stay on through it instead of snapping off
+            for sa, sb in slow:
+                if abs(sb - min(outs)) < 0.1:
+                    a = min(a, sa)
+            spans.append((a, b))
+            snaps.append(False)
         sched.letterbox = spans
         sched.letterbox_snap = snaps
 

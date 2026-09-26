@@ -5,7 +5,7 @@ Mouse:
   double-click ............ add beat (MUSIC) or hit (VIDEO)
   right-click marker ...... delete it
   drag a caption/effect ... move its edges (snap to beats) on the EDIT track
-  wheel ................... zoom around the cursor; Shift+wheel = pan
+  wheel / scrollbar ....... scroll; Ctrl/Cmd+wheel = zoom around the cursor
 Keys: Delete/Backspace = delete, S = split combo, M = merge with previous,
   F = zoom to fit, E = hit effects on/off for the selected hit.
 """
@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QScrollBar, QWidget
 
 from . import theme
 
@@ -59,6 +59,9 @@ class Timeline(QWidget):
         self.setFixedHeight(y + 2)
         self.setFocusPolicy(Qt.ClickFocus)
         self.setMouseTracking(True)
+        # a horizontal scrollbar the window puts under the timeline (pixels)
+        self.hbar = QScrollBar(Qt.Horizontal)
+        self.hbar.valueChanged.connect(self._scrolled)
 
     # ---------------------------------------------------------- coordinates
     def x_of(self, t):
@@ -93,11 +96,46 @@ class Timeline(QWidget):
 
     def wheelEvent(self, e):
         d = e.angleDelta().y() or e.angleDelta().x()
-        if e.modifiers() & Qt.ShiftModifier or abs(e.angleDelta().x()) > abs(e.angleDelta().y()):
-            self.offset = max(0.0, self.offset - d / 120 * 80 / self.pps)
-            self.update()
-        elif d:
+        if not d:
+            return
+        if e.modifiers() & Qt.ControlModifier:          # Ctrl (Cmd on a Mac) + wheel
             self._zoom(e.position().x(), 1.2 if d > 0 else 1 / 1.2)
+        else:                                           # wheel / trackpad: scroll
+            self.offset = min(self._max_offset(), max(0.0, self.offset - d / 120 * 80 / self.pps))
+            self.update()
+
+    # ---------------------------------------------------------- scrollbar
+    def _span(self) -> float:
+        p = self.project
+        if p is None:
+            return 10.0
+        return max(p.music_duration, p.video_duration, 10.0) + 2.0
+
+    def _max_offset(self) -> float:
+        return max(0.0, self._span() - self.width() / self.pps)
+
+    def _sync_bar(self):
+        bar = self.hbar
+        bar.blockSignals(True)
+        bar.setRange(0, int(round(self._max_offset() * self.pps)))
+        bar.setPageStep(max(1, self.width()))
+        bar.setSingleStep(max(1, self.width() // 20))
+        bar.setValue(int(round(self.offset * self.pps)))
+        bar.blockSignals(False)
+
+    def _scrolled(self, v):
+        self.offset = v / self.pps
+        self.update()
+
+    def update(self, *args):
+        # every view change (scroll, zoom, new project) goes through here, so
+        # the scrollbar follows even while the timeline is scrolled out of view
+        self._sync_bar()
+        super().update(*args)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._sync_bar()
 
     # -------------------------------------------------------------- picking
     def _nearest(self, track, x):

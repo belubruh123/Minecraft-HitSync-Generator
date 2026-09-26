@@ -178,6 +178,40 @@ class CaptionTests(unittest.TestCase):
         self.assertGreater((f.min(axis=2) > 240).sum(), 50)      # white fill
         self.assertGreater((f.max(axis=2) < 20).sum(), 50)       # black outline
 
+    def test_glow_style_is_the_default(self):
+        from hitsync.text_overlay import DEFAULT_STYLE, font_path
+
+        self.assertEqual(TextItem("GG", 0, 1).style, "glow")
+        self.assertEqual(DEFAULT_STYLE, "glow")
+        self.assertTrue(font_path("Fredoka").endswith("Fredoka-Bold.ttf"))
+        self.assertEqual(TextItem.from_dict({"text": "x", "start": 0, "end": 1}).style, "glow")
+
+    def test_glow_white_fill_purple_outline_and_halo(self):
+        f = np.full((360, 640, 3), 40, np.uint8)
+        draw_caption(f, TextItem("GG EZ", 0, 2, "center", "glow", "none", size=1.6), 1.0)
+        b, g, r = (f[..., k].astype(int) for k in range(3))
+        white = (b > 235) & (g > 235) & (r > 235)
+        purple = (b > r) & (r > g + 40) & (b > 120)
+        self.assertGreater(white.sum(), 300)                     # white letters
+        self.assertGreater(purple.sum(), 300)                    # purple outline + glow
+        # the glow reaches past the outline: purple pixels far from any white one
+        ys, xs = np.nonzero(white)
+        far = purple.copy()
+        far[max(0, ys.min() - 6): ys.max() + 7, max(0, xs.min() - 6): xs.max() + 7] = False
+        self.assertGreater(far.sum(), 20)
+        # and fades out smoothly: no hard box edge around the sprite
+        from hitsync.text_overlay import render_sprite
+
+        sp = render_sprite("GG EZ", "glow", 43, 576)
+        self.assertEqual(float(max(sp[0, :, 3].max(), sp[-1, :, 3].max(),
+                                   sp[:, 0, 3].max(), sp[:, -1, 3].max())), 0.0)
+
+    def test_multiline_bottom_caption_stays_inside(self):
+        f = np.zeros((360, 640, 3), np.uint8)
+        draw_caption(f, TextItem("GG EZ\nSECOND LINE", 0, 2, "bottom", animation="none"), 1.0)
+        ys = np.nonzero(f.max(axis=(1, 2)) > 200)[0]
+        self.assertLess(ys.max(), 360 - 0.04 * 360)
+
     def test_caption_through_look(self):
         s, _ = schedule()
         t = s.start + 2.0

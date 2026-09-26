@@ -47,6 +47,9 @@ class Project:
     extra_audio: list = field(default_factory=list)
     extra_keys: list = field(default_factory=list)
     extra_starts: list = field(default_factory=list)     # song s; < 0 = automatic
+    extra_ends: list = field(default_factory=list)       # song s cut; < 0 = automatic
+    # Song 1 cut: where it switches to song 2 (or the music ends); < 0 = automatic
+    music_cut: float = -1.0
     grid_fix: dict = field(default_factory=dict)         # song index -> [bpm, offset ms]
     # Captions and effect ranges on the montage (music time)
     texts: list = field(default_factory=list)            # text_overlay.TextItem
@@ -93,7 +96,8 @@ class Project:
 
     def _sync_extra_lists(self):
         n = len(self.extra_music)
-        for name, fill in (("extra_audio", None), ("extra_keys", ""), ("extra_starts", -1.0)):
+        for name, fill in (("extra_audio", None), ("extra_keys", ""), ("extra_starts", -1.0),
+                           ("extra_ends", -1.0)):
             lst = getattr(self, name)
             del lst[n:]
             lst.extend([fill] * (n - len(lst)))
@@ -258,28 +262,32 @@ class Project:
         from .soundtrack import MusicTimeline, Song
 
         self._sync_extra_lists()
-        if not any(a is not None for a in self.extra_audio):
+        if not any(a is not None for a in self.extra_audio) and not self.music_cut > 0:
             return None
         a0 = self.audio
-        end0 = a0.sections.song_end or a0.duration
-        if end0 < self.sync.drop_time + 10.0:          # song 1 must carry the start
-            end0 = a0.duration
-        if len(d0):                                    # hand over on a bar line
-            end0 = float(d0[np.argmin(np.abs(d0 - end0))])
-        songs = [Song(self.music_path, a0.duration, 0.0, end0, b0, d0)]
+        end0, auto0 = self.song_end(0, d0)
+        songs = [Song(self.music_path, a0.duration, 0.0, end0, b0, d0, cut=not auto0)]
         for k, a in enumerate(self.extra_audio, start=1):
             if a is None:
                 continue
             bk, dk, _ = self.song_grid(k)
+            end, auto = self.song_end(k, dk)
             songs.append(Song(self.extra_music[k - 1], a.duration, self.song_start(k, bk),
-                              a.sections.song_end or a.duration, bk, dk))
+                              end, bk, dk, cut=not auto))
         return MusicTimeline(songs)
 
     def timeline(self):
         return getattr(self, "_tl", None)
 
+    @property
+    def song_count(self) -> int:
+        return (1 if self.music_path else 0) + len(self.extra_music)
+
     def song_start(self, k: int, beats=None) -> float:
-        """Where song k (k >= 1) starts when it takes over, on its own clock."""
+        """Where song k starts, on its own clock: song 1's drop (the first
+        combo hit lands there); songs 2+ reach it when they take over."""
+        if k == 0:
+            return self.sync.drop_time
         a = self._song(k)
         t = self.extra_starts[k - 1] if k - 1 < len(self.extra_starts) else -1.0
         if t is None or t < 0:
@@ -297,20 +305,131 @@ class Project:
         self.apply_beat_grid()
         return self.song_start(k)
 
+    def _cut(self, k: int) -> float:
+        if k == 0:
+            return self.music_cut
+        return self.extra_ends[k - 1] if k - 1 < len(self.extra_ends) else -1.0
+
+    @staticmethod
+    def _nearest(arr, t: float) -> float:
+        arr = np.asarray(arr, float)
+        return float(arr[np.argmin(np.abs(arr - t))]) if len(arr) else float(t)
+
+    def song_end(self, k: int, downbeats=None) -> tuple[float, bool]:
+        """(song time where song k switches to the next song, or where the
+        music ends for the last song; automatic?). Always on a bar line."""
+        a = self._song(k)
+        if downbeats is None:
+            downbeats = self.song_grid(k)[1]
+        cut = self._cut(k)
+        if cut is not None and cut > 0:
+            return min(a.duration, self._nearest(downbeats, cut)), False
+        if k >= self.song_count - 1:
+            return a.duration, True                     # the last song plays out
+        end = a.sections.song_end or a.duration
+        if k == 0:
+            if end < self.sync.drop_time + 10.0:        # song 1 must carry the start
+                end = a.duration
+            if len(downbeats):                          # hand over on a bar line
+                end = self._nearest(downbeats, end)
+        return end, True
+
+    def set_song_end(self, k: int, t: float) -> Optional[float]:
+        """Cut song k here: the next song takes over on this bar (the last
+        song: the music ends here). Snapped to the nearest bar line; None
+        if that is not at least a bar after the song's start."""
+        if self._song(k) is None:
+            return None
+        beats, downs, _ = self.song_grid(k)
+        grid = downs if len(downs) else beats
+        t = self._nearest(grid, t)
+        bar = float(np.median(np.diff(downs))) if len(downs) > 1 else 2.0
+        if t < self.song_start(k, beats) + bar - 1e-3:
+            return None
+        if k == 0:
+            self.music_cut = t
+        else:
+            self._sync_extra_lists()
+            self.extra_ends[k - 1] = t
+        self.apply_beat_grid()
+        return t
+
+    def clear_song_end(self, k: int):
+        """Back to the automatic end (the song's last loud bar / its end)."""
+        if k == 0:
+            self.music_cut = -1.0
+        elif k - 1 < len(self.extra_ends):
+            self.extra_ends[k - 1] = -1.0
+        self.apply_beat_grid()
+
+    # ---- order / add / remove: every song as one record, so its analysis,
+    # start, cut and beat fixes move with it (nothing is re-analysed)
+    def _song_records(self) -> list:
+        self._sync_extra_lists()
+        recs = [dict(path=self.music_path, audio=self.audio, key=self.audio_key,
+                     start=self.sync.drop_time if self.audio is not None else -1.0,
+                     end=self.music_cut,
+                     fix=[self.sync.bpm_override, self.sync.grid_offset_ms])]
+        for k, path in enumerate(self.extra_music):
+            recs.append(dict(path=path, audio=self.extra_audio[k], key=self.extra_keys[k],
+                             start=self.extra_starts[k], end=self.extra_ends[k],
+                             fix=list(self.grid_fix.get(k + 1, [0.0, 0.0]))))
+        return recs
+
+    def _set_song_records(self, recs: list):
+        r0, rest = recs[0], recs[1:]
+        self.music_path, self.audio, self.audio_key = r0["path"], r0["audio"], r0["key"]
+        self.music_cut = r0["end"]
+        self.sync.bpm_override, self.sync.grid_offset_ms = (float(x) for x in r0["fix"])
+        self.extra_music = [r["path"] for r in rest]
+        self.extra_audio = [r["audio"] for r in rest]
+        self.extra_keys = [r["key"] for r in rest]
+        self.extra_starts = [r["start"] for r in rest]
+        self.extra_ends = [r["end"] for r in rest]
+        self.grid_fix = {k: list(r["fix"]) for k, r in enumerate(rest, start=1)
+                         if any(abs(float(x)) > 1e-9 for x in r["fix"])}
+        if self.audio is None:
+            self._tl = None
+            return
+        # the first song's start point is the drop (where the first hit lands)
+        start = r0["start"]
+        self.sync.drop_time = self.audio.sections.best if start is None or start < 0 else start
+        self.apply_beat_grid()
+        self.set_drop(self.sync.drop_time)
+        self.auto_intro()
+
+    def set_song_order(self, order):
+        """Play the songs in this order (a permutation of 0..n-1)."""
+        recs = self._song_records()
+        order = [int(i) for i in order]
+        if sorted(order) != list(range(len(recs))):
+            raise ValueError("not a song order")
+        if order != list(range(len(recs))):
+            self._set_song_records([recs[i] for i in order])
+
+    def move_song(self, k: int, d: int) -> int:
+        """Move song k one place earlier (d = -1) or later (+1); its new index."""
+        n = len(self._song_records())
+        j = k + d
+        if not (0 <= k < n and 0 <= j < n):
+            return k
+        order = list(range(n))
+        order[k], order[j] = order[j], order[k]
+        self.set_song_order(order)
+        return j
+
     def add_song(self, path: str):
         self.extra_music.append(path)
         self._sync_extra_lists()
 
-    def remove_song(self, k: int):
-        """Remove song k >= 1 (song 1 is replaced, not removed)."""
-        if 1 <= k <= len(self.extra_music):
-            for name in ("extra_music", "extra_audio", "extra_keys", "extra_starts"):
-                lst = getattr(self, name)
-                if k - 1 < len(lst):
-                    del lst[k - 1]
-            self.grid_fix = {(j if j < k else j - 1): v for j, v in self.grid_fix.items()
-                             if j != k}
-            self.apply_beat_grid()
+    def remove_song(self, k: int) -> bool:
+        """Remove song k, the first one included, as long as one song stays."""
+        recs = self._song_records()
+        if len(recs) < 2 or not 0 <= k < len(recs):
+            return False
+        del recs[k]
+        self._set_song_records(recs)
+        return True
 
     @property
     def beat_period(self) -> float:
@@ -384,9 +503,13 @@ class Project:
         groups = self.markers.combos()
         real = self.real_combos()
         if not self.plan_custom:
+            def carried(t):
+                # keep the lead-in / focus ticks of a combo that is still there
+                old = [c for c in self.combo_plan if abs(c.key - t) < 0.3]
+                return (any(c.lead_in for c in old), any(c.focus for c in old))
+
             self.combo_plan = [ComboChoice(self.markers.hits[g[0]].t, True,
-                                           any(c.lead_in and abs(c.key - self.markers.hits[g[0]].t) < 0.3
-                                               for c in self.combo_plan))
+                                           *carried(self.markers.hits[g[0]].t))
                                for g in real]
         out, used = [], set()
         for c in self.combo_plan:
@@ -406,7 +529,8 @@ class Project:
         return out
 
     def engine_plan(self):
-        return [(g, c.lead_in) for c, g in self.plan_entries() if c.enabled]
+        """[(hit indices, slow-mo lead-in?, focus bars?)] of the used combos, in order."""
+        return [(g, c.lead_in, c.focus) for c, g in self.plan_entries() if c.enabled]
 
     def set_plan(self, choices):
         """Replace the plan (UI: reorder / tick / lead-in)."""
@@ -606,6 +730,7 @@ class Project:
             "combo_plan": [c.to_dict() for c in self.combo_plan],
             "plan_custom": self.plan_custom,
             "extra_music": list(self.extra_music), "extra_starts": list(self.extra_starts),
+            "extra_ends": list(self.extra_ends), "music_cut": self.music_cut,
             "extra_keys": list(self.extra_keys),
             "extra_audio": [a.to_dict() if a is not None else None for a in self.extra_audio],
             "grid_fix": {str(k): v for k, v in self.grid_fix.items()},
@@ -641,6 +766,8 @@ class Project:
         p.plan_custom = bool(d.get("plan_custom", False))
         p.extra_music = list(d.get("extra_music", []))
         p.extra_starts = [float(x) for x in d.get("extra_starts", [])]
+        p.extra_ends = [float(x) for x in d.get("extra_ends", [])]
+        p.music_cut = float(d.get("music_cut", -1.0))
         p.extra_keys = list(d.get("extra_keys", []))
         p.extra_audio = []
         for a in d.get("extra_audio", []):
@@ -655,7 +782,7 @@ class Project:
         p.texts = [TextItem.from_dict(x) for x in d.get("texts", [])]
         p.effects = [EffectRange.from_dict(x) for x in d.get("effects", [])]
         p._sync_extra_lists()
-        if p.audio is not None and p.extra_music:
+        if p.audio is not None and (p.extra_music or p.music_cut > 0):
             p._tl = p._build_timeline(*p.song_grid(0)[:2])
         if d.get("video"):
             p.video = VideoAnalysis.from_dict(d["video"])

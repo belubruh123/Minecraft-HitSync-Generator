@@ -17,19 +17,20 @@ import traceback
 import numpy as np
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-                               QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-                               QSizePolicy, QSlider, QSplitter, QStackedWidget, QTabWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
+                               QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar,
+                               QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter,
+                               QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import styles
 from ..project import Project, default_output_path
 from . import theme
 from .advanced import AdvancedDialog
-from .panels import CombosPanel, EffectsPanel, TextPanel
+from .panels import CombosPanel, EffectsPanel, MusicPanel, TextPanel
 from .timeline import Timeline
 from .video_view import FullscreenPlayer, SongView, VideoView
-from .widgets import DropCard, Segmented, ValueSlider, button, kind_of, label
+from .widgets import (DropCard, ElidedLabel, FlowLayout, Segmented, ValueSlider, button,
+                      install_wheel_guard, kind_of, label)
 
 VIDEO_FILTER = "Video (*.mp4 *.mkv *.mov *.avi *.webm *.flv *.m4v);;All files (*)"
 AUDIO_FILTER = "Audio (*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.opus);;All files (*)"
@@ -91,8 +92,15 @@ class MainWindow(QMainWindow):
 
     # ================================================================ layout
     def _build(self):
+        # the whole window scrolls when the screen is too small for it (no
+        # scrollbars otherwise); the wheel over a slider scrolls the panels
+        install_wheel_guard(QApplication.instance())
         root = QWidget()
-        self.setCentralWidget(root)
+        self.page = QScrollArea()
+        self.page.setWidgetResizable(True)
+        self.page.setFrameShape(QFrame.NoFrame)
+        self.page.setWidget(root)
+        self.setCentralWidget(self.page)
         v = QVBoxLayout(root)
         v.setContentsMargins(12, 10, 12, 6)
         v.setSpacing(8)
@@ -128,14 +136,15 @@ class MainWindow(QMainWindow):
                                  slot=lambda: self.set_mode("song"))
         info.addWidget(self.tempo_chip)
         info.addWidget(label("Music starts:", muted=True))
-        self.start_chips = QHBoxLayout()
-        info.addLayout(self.start_chips)
+        chips = QWidget()
+        self.start_chips = FlowLayout(chips, spacing=6)      # wraps when narrow
+        info.addWidget(chips, 3)
         mark = button("🎧 Choose by listening", "Play the song and click where it should start",
                       flat=True, slot=lambda: self.set_mode("song"))
         info.addWidget(mark)
-        info.addStretch(1)
-        self.combo_lbl = label("", muted=True)
-        info.addWidget(self.combo_lbl)
+        self.combo_lbl = ElidedLabel("", muted=True)
+        self.combo_lbl.setAlignment(Qt.AlignRight)
+        info.addWidget(self.combo_lbl, 2)
         self.progress = QProgressBar()
         self.progress.setFixedWidth(160)
         self.progress.setVisible(False)
@@ -158,8 +167,9 @@ class MainWindow(QMainWindow):
         self.mode_seg.changed.connect(self.set_mode)
         modes.addWidget(self.mode_seg)
         modes.addStretch(1)
-        self.mode_hint = label("", muted=True)
-        modes.addWidget(self.mode_hint)
+        self.mode_hint = ElidedLabel("", muted=True)
+        self.mode_hint.setAlignment(Qt.AlignRight)
+        modes.addWidget(self.mode_hint, 1)
         lv.addLayout(modes)
         self.stack = QStackedWidget()
         self.view = VideoView()
@@ -190,14 +200,22 @@ class MainWindow(QMainWindow):
         self.texts.changed.connect(self._overlays_changed)
         self.texts.seek.connect(self.seek)
         self.texts.set_time.connect(self._text_time)
+        self.music_panel = MusicPanel()
+        self.music_panel.add.connect(self.pick_music)
+        self.music_panel.select.connect(self._song_selected)
+        self.music_panel.move.connect(self._move_song)
+        self.music_panel.order.connect(self._song_order)
+        self.music_panel.remove.connect(self._remove_song)
+        self.music_panel.reset_cut.connect(self._reset_cut)
         self.fx_panel = EffectsPanel(lambda: self.project)
         self.fx_panel.changed.connect(self._look_changed)
         self.fx_panel.add_range.connect(self._add_range)
         self.fx_panel.seek.connect(self.seek)
         self.side.addTab(self.combos, "Combos")
+        self.side.addTab(self.music_panel, "Music")
         self.side.addTab(self.texts, "Text")
         self.side.addTab(self.fx_panel, "Effects")
-        self.side.setMinimumWidth(340)
+        self.side.setMinimumWidth(300)
         split.addWidget(self.side)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
@@ -237,6 +255,8 @@ class MainWindow(QMainWindow):
         self.timeline.selected_changed.connect(self._timeline_selected)
         self.timeline.setVisible(False)
         v.addWidget(self.timeline)
+        self.timeline.hbar.setVisible(False)
+        v.addWidget(self.timeline.hbar)
         self.statusBar().showMessage("Drop a gameplay video and a song to begin.")
         self.advanced = AdvancedDialog(lambda: self.project, self)
         self.advanced.changed.connect(self._advanced_changed)
@@ -270,7 +290,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        self.summary = label("", muted=True)
+        self.summary = ElidedLabel("", muted=True)
         h.addWidget(self.summary, 1)
         return w
 
@@ -281,20 +301,24 @@ class MainWindow(QMainWindow):
         v.setSpacing(4)
         r1 = QHBoxLayout()
         self.song_pick = QComboBox()
+        self.song_pick.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.song_pick.setMinimumContentsLength(10)
         self.song_pick.currentIndexChanged.connect(self._song_picked)
         r1.addWidget(self.song_pick, 1)
-        self.remove_song_btn = button("Remove song", flat=True, slot=self._remove_song)
-        r1.addWidget(self.remove_song_btn)
         self.mark_music = button("✔ Music starts here  (M)",
                                  "Play the song, and click this where the montage's first "
                                  "hit should land", primary=True, slot=self.mark)
         r1.addWidget(self.mark_music)
+        self.cut_btn = button("✂ Switch to next song here  (C)",
+                              "Play the song, and click this where it should stop; the next "
+                              "song takes over on this bar", slot=self.cut)
+        r1.addWidget(self.cut_btn)
         v.addLayout(r1)
-        r2 = QHBoxLayout()
+        fixes = QWidget()
+        r2 = FlowLayout(fixes, spacing=4)                   # wraps when narrow
         self.grid_lbl = label("", muted=True)
         r2.addWidget(self.grid_lbl)
-        r2.addStretch(1)
-        r2.addWidget(label("Beat looks off?", muted=True))
+        r2.addWidget(label("  Beat looks off?", muted=True))
         for text, tip, fn in (
                 ("Tap (T)", "Tap along with the beat, 8 times or more", self.tap),
                 ("½×", "Half the tempo", lambda: self._grid_fix("half")),
@@ -304,7 +328,7 @@ class MainWindow(QMainWindow):
                 ("10 ms ▶", "Clicks a little early", lambda: self._grid_fix(10)),
                 ("Reset", "Back to what was detected", lambda: self._grid_fix("reset"))):
             r2.addWidget(button(text, tip, flat=True, slot=fn))
-        v.addLayout(r2)
+        v.addWidget(fixes)
         return w
 
     def _gameplay_actions(self):
@@ -356,7 +380,8 @@ class MainWindow(QMainWindow):
 
     def _shortcuts(self):
         for key, fn in ((Qt.Key_Space, self.toggle_play), (Qt.Key_M, self.mark),
-                        (Qt.Key_T, self.tap), (Qt.Key_Left, lambda: self.step(-1)),
+                        (Qt.Key_T, self.tap), (Qt.Key_C, self.cut),
+                        (Qt.Key_Left, lambda: self.step(-1)),
                         (Qt.Key_Right, lambda: self.step(1)),
                         (Qt.Key_Home, lambda: self.seek(self._program_start()))):
             QShortcut(QKeySequence(key), self, activated=fn)
@@ -572,6 +597,11 @@ class MainWindow(QMainWindow):
             return
         self._update_info()
         self._refresh_plan()
+        # caption / effect times are shown on the montage clock (like the player)
+        if abs(self.texts.origin - p.schedule.start) > 1e-6:
+            self.texts.origin = p.schedule.start
+            self.texts.refresh_times()
+            self.fx_panel.refresh_ranges()
         self.timeline.update()
         if self.mode == "montage":
             self._load_program(keep=True)
@@ -592,9 +622,10 @@ class MainWindow(QMainWindow):
                 "Song tab.")
         # music start chips
         while self.start_chips.count():
-            it = self.start_chips.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
+            wdg = self.start_chips.takeAt(0).widget()
+            if wdg is not None:
+                wdg.setParent(None)                  # gone now, not when Qt gets to it
+                wdg.deleteLater()
         if p.audio is not None:
             for t, text in p.start_candidates():
                 b = button(f"{theme.fmt_short(t)} {text}", "Start the combos here", chip=True,
@@ -625,7 +656,7 @@ class MainWindow(QMainWindow):
             self.combos.set_entries([], p.markers, {}, True)
             return
         entries = p.plan_entries()
-        sig = tuple((round(c.key, 4), c.enabled, c.lead_in, len(g)) for c, g in entries) + \
+        sig = tuple((round(c.key, 4), c.enabled, c.lead_in, c.focus, len(g)) for c, g in entries) + \
             tuple(h.fx for h in p.markers.hits)
         if sig != getattr(self, "_plan_sig", None):
             self._plan_sig = sig
@@ -817,8 +848,9 @@ class MainWindow(QMainWindow):
         p.add_effect(kind, start, end)
         self.fx_panel.refresh_ranges()
         self._overlays_changed()
-        self.statusBar().showMessage(f"Added {kind} from {theme.fmt_time(start)} to "
-                                     f"{theme.fmt_time(end)}")
+        o = self.project.schedule.start if self.project.schedule is not None else 0.0
+        self.statusBar().showMessage(f"Added {kind} from {theme.fmt_time(start - o)} to "
+                                     f"{theme.fmt_time(end - o)}")
 
     def _overlays_changed(self):
         self.texts.refresh_times()
@@ -837,22 +869,135 @@ class MainWindow(QMainWindow):
         self.song_index = min(self.song_index, max(0, self.song_pick.count() - 1))
         self.song_pick.setCurrentIndex(self.song_index)
         self.song_pick.blockSignals(False)
-        self.remove_song_btn.setVisible(self.song_index > 0)
+        self._update_cut_button()
+        self._refresh_music_panel()
+
+    def _update_cut_button(self):
+        last = self.song_index >= self.project.song_count - 1
+        self.cut_btn.setText("✂ End the music here  (C)" if last
+                             else "✂ Switch to next song here  (C)")
+
+    def _song_infos(self):
+        p = self.project
+        infos = []
+        n = p.song_count
+        for k, path in enumerate(p.music_paths):
+            if not path:
+                continue
+            info = {"name": os.path.basename(path), "detail": "Analysing…", "span": ""}
+            a = p._song(k)
+            if a is not None:
+                _, downs, bpm = p.song_grid(k)
+                end, auto = p.song_end(k, downs)
+                info["detail"] = f"{bpm:.1f} BPM · {theme.fmt_short(a.duration)}"
+                start = p.song_start(k)
+                verb = "ends at" if k == n - 1 else "switches at"
+                info["span"] = (f"{'First hit' if k == 0 else 'Starts'} at "
+                                f"{theme.fmt_short(start)} · {verb} {theme.fmt_short(end)}"
+                                + (" (auto)" if auto else " ✂"))
+                info["cut_manual"] = not auto
+            infos.append(info)
+        return infos
+
+    def _refresh_music_panel(self, force=False):
+        infos = self._song_infos()
+        sig = (tuple(tuple(sorted(i.items())) for i in infos), self.song_index)
+        if force or sig != getattr(self, "_music_sig", None):
+            self._music_sig = sig
+            self.music_panel.set_songs(infos, self.song_index)
 
     def _song_picked(self, i):
         self.song_index = max(0, i)
-        self.remove_song_btn.setVisible(self.song_index > 0)
+        self._update_cut_button()
+        self._refresh_music_panel()
         if self.mode == "song":
+            self._song_view_update()
             self._load_program(keep=False)
 
-    def _remove_song(self):
-        if self.song_index > 0:
-            self.project.remove_song(self.song_index)
-            self.song_index = 0
-            self._refresh_song_list()
-            self._refresh_cards()
-            self.recalc()
+    def _song_selected(self, k):
+        """A song clicked in the Music panel: listen to it in the Song view."""
+        self.song_index = k
+        self.song_pick.blockSignals(True)
+        self.song_pick.setCurrentIndex(k)
+        self.song_pick.blockSignals(False)
+        self._update_cut_button()
+        self._refresh_music_panel()
+        if self.mode != "song":
+            self.set_mode("song")
+        else:
+            self._song_view_update()
             self._load_program(keep=False)
+
+    def _songs_busy(self):
+        if "analyze" in self.busy:
+            self.statusBar().showMessage("Wait for the songs to finish analysing.", 4000)
+            return True
+        return False
+
+    def _songs_changed(self, message=""):
+        self.engine.pause()
+        self._refresh_song_list()
+        self._refresh_cards()
+        self._refresh_music_panel(force=True)
+        self.recalc(now=True)
+        if self.mode == "song":
+            self._song_view_update()
+        self._load_program(keep=self.mode != "song")
+        if message:
+            self.statusBar().showMessage(message, 5000)
+
+    def _move_song(self, k, d):
+        if self._songs_busy():
+            return
+        j = self.project.move_song(k, d)
+        if j != k:
+            if self.song_index == k:
+                self.song_index = j
+            elif self.song_index == j:
+                self.song_index = k
+            self._songs_changed(f"Song moved to place {j + 1}")
+
+    def _song_order(self, order):
+        if self._songs_busy():
+            self._refresh_music_panel(force=True)
+            return
+        cur = self.song_index
+        self.project.set_song_order(order)
+        self.song_index = order.index(cur) if cur in order else 0
+        self._songs_changed("New song order")
+
+    def _remove_song(self, k=None):
+        if self._songs_busy():
+            return
+        k = self.song_index if k is None else k
+        name = os.path.basename(self.project.music_paths[k])
+        if self.project.remove_song(k):
+            if self.song_index > k or self.song_index >= self.project.song_count:
+                self.song_index = max(0, self.song_index - 1)
+            self._songs_changed(f"Removed {name}")
+
+    def _reset_cut(self, k):
+        self.project.clear_song_end(k)
+        self._songs_changed("Back to the automatic end")
+
+    def cut(self):
+        """✂ at the playhead: the song switches to the next one (or the music
+        ends) on this bar."""
+        p = self.project
+        if self.mode != "song" or p._song(self.song_index) is None:
+            if p.audio is not None:
+                self.statusBar().showMessage("Open the Song view (Music tab: click a song), "
+                                             "play it, then press ✂ where it should stop.", 5000)
+            return
+        k = self.song_index
+        t = p.set_song_end(k, self.engine.time())
+        if t is None:
+            self.statusBar().showMessage("Too early: cut at least a bar after the song's start.",
+                                         5000)
+            return
+        last = k >= p.song_count - 1
+        self._songs_changed(f"{'Music ends' if last else 'Next song takes over'} at "
+                            f"{theme.fmt_time(t)} (song {k + 1})")
 
     def _set_start(self, k, t):
         p = self.project
@@ -932,11 +1077,15 @@ class MainWindow(QMainWindow):
         cands = [(float(beats[np.argmin(np.abs(beats - c.time))]) if len(beats) else c.time,
                   c.label) for c in a.sections.top(3)]
         name = os.path.basename(p.music_paths[self.song_index])
+        end, auto = p.song_end(self.song_index, downs)
+        last = self.song_index >= p.song_count - 1
         self.song_view.set_song(a.curve_t, a.level, beats, downs, a.duration, start, cands,
-                                f"Song {self.song_index + 1}: {name}")
+                                f"Song {self.song_index + 1}: {name}", end,
+                                "MUSIC ENDS" if last else "NEXT SONG", auto)
         g = a.grid
         self.grid_lbl.setText(f"{bpm:.2f} BPM · confidence {g.confidence:.0%}"
                               + (" · tempo wanders, following the drummer" if g.drift else ""))
+        self._refresh_music_panel()
 
     # ============================================================ playback
     def set_mode(self, mode):
@@ -1220,6 +1369,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_timeline(self, on):
         self.timeline.setVisible(on)
+        self.timeline.hbar.setVisible(on)
         self.tl_btn.setText("Timeline ▴" if on else "Timeline ▾")
         if on:
             QTimer.singleShot(0, self.timeline.zoom_fit)
@@ -1327,9 +1477,11 @@ class MainWindow(QMainWindow):
             "← →  one beat back / forward\n"
             "M  mark: music starts here (Song) / combat starts here (Gameplay)\n"
             "T  tap along with the beat (Song)\n"
+            "C  cut: the next song takes over here / the music ends here (Song)\n"
             f"{theme.MOD}S  save project · {theme.MOD}O open · {theme.MOD}E export\n\n"
             "Timeline: double-click adds a beat/hit, right-click deletes, S splits a combo,\n"
-            "M merges it with the previous one, E toggles effects on a hit."))
+            "M merges it with the previous one, E toggles effects on a hit.\n"
+            f"The wheel scrolls the timeline; {theme.MOD}wheel zooms."))
 
     def closeEvent(self, e):
         self.settings.setValue("geometry", self.saveGeometry())
