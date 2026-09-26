@@ -48,6 +48,18 @@ class Project:
     extra_keys: list = field(default_factory=list)
     extra_starts: list = field(default_factory=list)     # song s; < 0 = automatic
     grid_fix: dict = field(default_factory=dict)         # song index -> [bpm, offset ms]
+    # Captions and effect ranges on the montage (music time)
+    texts: list = field(default_factory=list)            # text_overlay.TextItem
+    effects: list = field(default_factory=list)          # effects.EffectRange
+
+    @classmethod
+    def new(cls, **kw) -> "Project":
+        """A fresh project with the default look (what the app and CLI use)."""
+        from .styles import DEFAULT, apply_style
+
+        p = cls(**kw)
+        apply_style(p, DEFAULT)
+        return p
 
     # ------------------------------------------------------------ analysis
     @property
@@ -525,7 +537,46 @@ class Project:
         self.sync.end_hold = r.fade_out_len if r.fade_out not in ("", "none") else 0.0
         self.schedule = build_schedule(self.markers, self.sync, vd, md, plan=plan,
                                        downbeats=self.downbeats)
+        # what the look needs besides the settings: per-hit effect choices,
+        # effect ranges and captions
+        fx = {i: h.fx for i, h in enumerate(self.markers.hits) if h.fx is not None}
+        self.schedule.overlays = (fx, list(self.effects), list(self.texts))
         return self.schedule
+
+    # ------------------------------------------------------------ overlays
+    def add_text(self, text: str, start: float, bars: float = 2.0, **kw):
+        from .text_overlay import TextItem
+
+        bar = 4 * self.beat_period
+        item = TextItem(text, self._snap_beat(start), self._snap_beat(start) + bars * bar, **kw)
+        self.texts.append(item)
+        self.texts.sort(key=lambda x: x.start)
+        return item
+
+    def add_effect(self, kind: str, start: float, end: float, strength: float = 1.0):
+        from .effects import EffectRange
+
+        rng = EffectRange(kind, self._snap_beat(start), self._snap_beat(end), strength)
+        if rng.end <= rng.start:
+            rng.end = rng.start + 4 * self.beat_period
+        self.effects.append(rng)
+        self.effects.sort(key=lambda x: x.start)
+        return rng
+
+    def combo_out_span(self, plan_index: int):
+        """(start, end) music time of a combo in the current edit."""
+        if self.schedule is None:
+            return None
+        for a, b, k in self.schedule.combo_spans:
+            if k == plan_index:
+                return a, b + self.beat_period * 0.5
+        return None
+
+    def set_hit_fx(self, indices, value):
+        """Tick / untick effects on hits (None = follow the default)."""
+        for i in indices:
+            if 0 <= i < len(self.markers.hits):
+                self.markers.hits[i].fx = value
 
     def render(self, progress=None, cancel=None, out_path: str | None = None) -> str:
         from .renderer import render
@@ -553,6 +604,8 @@ class Project:
             "extra_keys": list(self.extra_keys),
             "extra_audio": [a.to_dict() if a is not None else None for a in self.extra_audio],
             "grid_fix": {str(k): v for k, v in self.grid_fix.items()},
+            "texts": [x.to_dict() for x in self.texts],
+            "effects": [x.to_dict() for x in self.effects],
             "audio_key": self.audio_key, "video_key": self.video_key,
             "audio": self.audio.to_dict() if self.audio else None,
             "video": self.video.to_dict() if self.video else None,
@@ -591,6 +644,11 @@ class Project:
             except (KeyError, TypeError, ValueError):
                 p.extra_audio.append(None)
         p.grid_fix = {int(k): list(v) for k, v in d.get("grid_fix", {}).items()}
+        from .effects import EffectRange
+        from .text_overlay import TextItem
+
+        p.texts = [TextItem.from_dict(x) for x in d.get("texts", [])]
+        p.effects = [EffectRange.from_dict(x) for x in d.get("effects", [])]
         p._sync_extra_lists()
         if p.audio is not None and p.extra_music:
             p._tl = p._build_timeline(*p.song_grid(0)[:2])

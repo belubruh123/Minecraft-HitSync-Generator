@@ -94,7 +94,7 @@ class SyncParams:
     post_roll: float = 0.35         # source s kept after a combo's last hit
     outro: float = 1.0              # source s kept after the final combo
     end_hold: float = 0.0           # s the montage keeps going after the last hit
-    transition: str = "cut"         # "cut" | "flash"
+    transition: str = "cut"         # between combos: cut | flash | zoom | whip | dip
     flash_duration: float = 0.12
 
     # --- Velocity edit / slow-mo lead-ins -------------------------------------
@@ -137,9 +137,9 @@ class RenderParams:
     encoder: str = "auto"           # auto | x264 | nvenc | amf | qsv
     audio_fade_out: float = 1.5     # music fade after the last hit (no end fade chosen)
     # Start / end of the montage: none | black | white (the music fades too)
-    fade_in: str = "black"
+    fade_in: str = "none"
     fade_in_len: float = 0.6
-    fade_out: str = "black"
+    fade_out: str = "none"
     fade_out_len: float = 1.5
     # hit sounds (see audio_mix.HIT_SOUND_CHOICES)
     hit_sound: str = "original"     # original|off|classic|strong|crit|knockback|custom
@@ -147,6 +147,18 @@ class RenderParams:
     hit_volume: float = 0.8
     music_volume: float = 1.0
     hit_pitch_variation: bool = True
+    # --- look (see styles.py for the one-click presets) ----------------------
+    style: str = "clean"            # clean | montage | hype | cinematic | custom
+    filter: str = "none"            # effects.FILTERS
+    filter_strength: float = 0.7
+    vignette: float = 0.0           # 0..1 darker corners
+    motion_blur: float = 0.0        # 0..1 frames blended with the previous ones
+    hit_zoom: float = 0.0           # zoom punch on each (ticked) hit, e.g. 0.05
+    hit_shake: float = 0.0          # 0..1 screen shake on each hit
+    hit_flash: float = 0.0          # 0..1 white flash on each hit
+    hit_rgb: float = 0.0            # 0..1 RGB-split pulse on each hit
+    beat_pulse: float = 0.0         # 0..1 zoom pulse on every bar
+    hit_fx_default: bool = True     # hits not ticked either way get the effects
 
     to_dict = asdict
 

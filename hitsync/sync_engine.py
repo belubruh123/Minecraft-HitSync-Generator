@@ -801,7 +801,7 @@ class SyncEngine:
                 snaps.append(mode == "slowmo")
         if p.intro_flash:
             for a, b in slow:
-                sched.flashes.append((b, 0.85, 0.06, 0.22))
+                sched.flashes.append((b, 0.8, 0.05, 0.16))
         if mode in ("first combo", "first_combo") and combos:
             outs = [sched.placements[i].out_t for i in combos[0]
                     if sched.placements[i].out_t is not None]

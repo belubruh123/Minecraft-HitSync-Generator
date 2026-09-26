@@ -110,10 +110,10 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(s.letterbox_amount(DROP + 2 * PERIOD), 0.0)
         self.assertEqual(s.letterbox_amount((l0 + l1) / 2), 1.0)  # and in the lead-in
         # a quick flash peaks as each slow-mo part ends
-        self.assertGreater(s.flash_amount(DROP), 0.8)
+        self.assertGreater(s.flash_amount(DROP), 0.75)
         self.assertEqual(s.flash_amount(DROP + 0.5), 0.0)
         self.assertEqual(s.flash_amount(DROP - 0.5), 0.0)
-        self.assertGreater(s.flash_amount(l1), 0.8)
+        self.assertGreater(s.flash_amount(l1), 0.75)
         # modes
         s2 = build_schedule(m, params(letterbox_mode="first combo"), 100, 200,
                             plan=[(c1, False), (c2, False)])
