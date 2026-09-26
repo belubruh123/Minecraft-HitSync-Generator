@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import bisect
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -18,15 +18,21 @@ class Hit:
     strength: float = 1.0
     combo_start: bool = False
     manual: bool = False
+    fx: Optional[bool] = None   # hit effects on this hit: None = the default
 
     def to_dict(self):
-        return {"t": self.t, "strength": self.strength,
-                "combo_start": self.combo_start, "manual": self.manual}
+        d = {"t": self.t, "strength": self.strength,
+             "combo_start": self.combo_start, "manual": self.manual}
+        if self.fx is not None:
+            d["fx"] = self.fx
+        return d
 
     @classmethod
     def from_dict(cls, d):
+        fx = d.get("fx")
         return cls(float(d["t"]), float(d.get("strength", 1.0)),
-                   bool(d.get("combo_start", False)), bool(d.get("manual", False)))
+                   bool(d.get("combo_start", False)), bool(d.get("manual", False)),
+                   None if fx is None else bool(fx))
 
 
 @dataclass
@@ -51,7 +57,14 @@ class Markers:
 
     # ------------------------------------------------------------------- hits
     def set_hits(self, hits: List[Hit], combo_gap: float, regularity: float | None = None):
+        """Replace the hits (e.g. re-detection), keeping per-hit effect
+        choices of hits that are still there (matched within 60 ms)."""
+        old = [(h.t, h.fx) for h in self.hits if h.fx is not None]
         self.hits = sorted(hits, key=lambda h: h.t)
+        for t, fx in old:
+            near = min(self.hits, key=lambda h: abs(h.t - t), default=None)
+            if near is not None and abs(near.t - t) <= 0.06 and near.fx is None:
+                near.fx = fx
         self.auto_group(combo_gap, regularity)
 
     def auto_group(self, combo_gap: float, regularity: float | None = None):
@@ -148,3 +161,21 @@ class Markers:
         m.beats = sorted(float(b) for b in d.get("beats", []))
         m.hits = sorted((Hit.from_dict(h) for h in d.get("hits", [])), key=lambda h: h.t)
         return m
+
+
+@dataclass
+class ComboChoice:
+    """One entry of the combo plan: which combo, whether it's used, and
+    whether it gets a slow-mo lead-in. ``key`` is the combo's first hit time,
+    which survives re-grouping and re-detection."""
+
+    key: float
+    enabled: bool = True
+    lead_in: bool = False
+
+    def to_dict(self):
+        return {"key": self.key, "enabled": self.enabled, "lead_in": self.lead_in}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(float(d["key"]), bool(d.get("enabled", True)), bool(d.get("lead_in", False)))

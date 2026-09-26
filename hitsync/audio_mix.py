@@ -98,9 +98,11 @@ _music_cache: dict = {}
 
 
 def load_music(path: str) -> np.ndarray:
+    """Decoded song (44.1 kHz stereo float32); the last few are kept."""
     key = (path, os.path.getmtime(path) if os.path.exists(path) else 0)
     if key not in _music_cache:
-        _music_cache.clear()
+        while len(_music_cache) >= 4:
+            _music_cache.pop(next(iter(_music_cache)))
         _music_cache[key] = decode_audio(path)
     return _music_cache[key]
 
@@ -159,8 +161,15 @@ def _game_audio(video_path: str, mtime: float):
 
 @lru_cache(maxsize=2)
 def _sound_bursts(video_path: str, mtime: float):
-    """Attack times (s, audio timeline) and strengths of every distinct sound."""
+    """Attack times (s, audio timeline) and strengths of every distinct sound.
+
+    Onsets are found on the spectral flux, then moved onto the audible
+    attack in the waveform (the flux of a 46 ms window reacts ~20-30 ms
+    early), so a cut there starts right at the hit sound.
+    """
     import librosa
+
+    from .music_grid import refine_attacks
 
     game, _ = _game_audio(video_path, mtime)
     if game is None or not len(game):
@@ -171,9 +180,8 @@ def _sound_bursts(video_path: str, mtime: float):
     frames = librosa.onset.onset_detect(onset_envelope=env, sr=SR, hop_length=hop,
                                         units="frames", backtrack=False)
     strength = env[frames] if len(frames) else np.zeros(0)
-    # backtrack to the energy minimum right before each attack: the cut point
-    frames = librosa.onset.onset_backtrack(frames, env) if len(frames) else frames
-    return librosa.frames_to_time(frames, sr=SR, hop_length=hop), strength
+    times = librosa.frames_to_time(frames, sr=SR, hop_length=hop)
+    return refine_attacks(y, SR, times, search=(0.05, 0.04)), strength
 
 
 def _hit_onsets(video_path: str, src_times, sr: int = SR):
@@ -324,23 +332,31 @@ def _soft_limit(y: np.ndarray, knee: float = 0.9) -> np.ndarray:
     return y
 
 
-def build_soundtrack(music_path: str, schedule, rparams, duration: float | None = None,
-                     sr: int = SR, video_path: str | None = None) -> np.ndarray:
-    """Music trimmed to the edit, with hit sounds at every placed hit time.
+def build_soundtrack(music, schedule, rparams, duration: float | None = None,
+                     sr: int = SR, video_path: str | None = None, click: bool = False) -> np.ndarray:
+    """The montage soundtrack: music, hit sounds on every placed hit, fades.
 
-    ``hit_sound == "original"`` uses the real hit sound from the recording
-    (``video_path``); if the recording has no usable audio it falls back to
-    the classic Minecraft sound.
+    ``music`` is a song path or a ``soundtrack.MusicTimeline`` (several
+    songs crossfading). ``hit_sound == "original"`` uses the real hit sound
+    from the recording (``video_path``); without usable audio there it
+    falls back to the classic Minecraft sound. ``click`` adds a metronome
+    on the montage's beats (to check the beat grid by ear).
     """
+    from .soundtrack import MusicTimeline
+
     duration = schedule.duration if duration is None else duration
     n = int(round(duration * sr))
     t0 = float(getattr(schedule, "start", 0.0))      # song before this is cut
-    m0 = int(round(t0 * sr))
-    music = load_music(music_path)[m0: m0 + n] * float(rparams.music_volume)
-    out = np.zeros((n, 2), np.float32)
-    out[: len(music)] = music
-    if m0 > 0:                                        # no click where the song is cut
-        k = min(n, int(0.03 * sr))
+    if isinstance(music, MusicTimeline):
+        out = music.render(t0, n, sr, load_music) * float(rparams.music_volume)
+    else:
+        m0 = int(round(t0 * sr))
+        song = load_music(music)[m0: m0 + n] * float(rparams.music_volume)
+        out = np.zeros((n, 2), np.float32)
+        out[: len(song)] = song
+    fade_in = _fade_len(rparams, "in", duration)
+    k = min(n, int(max(0.03 if t0 > 0 else 0.0, fade_in) * sr))
+    if k > 0:                                         # no click where the song is cut
         out[:k] *= np.linspace(0, 1, k, dtype=np.float32)[:, None]
     end = t0 + duration
     placed = [pl for pl in schedule.placements
@@ -364,13 +380,28 @@ def build_soundtrack(music_path: str, schedule, rparams, duration: float | None 
             i = int(round((pl.out_t - t0) * sr))
             j = min(n, i + len(s))
             out[i:j] += s[: j - i] * vol
-    fade = min(float(rparams.audio_fade_out), duration / 3)
-    if placed:        # fade after the last hit only, never over the combo
-        fade = min(fade, max(0.1, end - max(pl.out_t for pl in placed)))
+    if click:
+        from .audio_analysis import click_track
+
+        beats = np.asarray(getattr(schedule, "beat_times", []), float) - t0
+        downs = np.asarray(getattr(schedule, "downbeats", []), float) - t0
+        out += click_track(beats, downs, n, sr)[:, None] * 0.8
+    fade = _fade_len(rparams, "out", duration)
+    if fade <= 0:
+        fade = min(float(rparams.audio_fade_out), duration / 3)
+        if placed:        # fade after the last hit only, never over the combo
+            fade = min(fade, max(0.1, end - max(pl.out_t for pl in placed)))
     if fade > 0:
-        k = int(fade * sr)
+        k = min(n, int(fade * sr))
         out[n - k:] *= np.linspace(1, 0, k, dtype=np.float32)[:, None]
     return _soft_limit(out)
+
+
+def _fade_len(rparams, which: str, duration: float) -> float:
+    kind = getattr(rparams, f"fade_{which}", "none")
+    if not kind or kind == "none":
+        return 0.0
+    return float(min(getattr(rparams, f"fade_{which}_len", 1.0), duration / 3))
 
 
 def write_wav(path: str, audio: np.ndarray, sr: int = SR):

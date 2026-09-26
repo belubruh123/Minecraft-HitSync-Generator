@@ -158,9 +158,23 @@ def analyze_video(path: str, params: DetectParams | None = None, progress=None,
 
     from concurrent.futures import ThreadPoolExecutor
 
+    from .ffmpeg_utils import hwaccel_args
+
+    # With two chunks, one decodes on the GPU (when there is one) while the
+    # other decodes on the CPU: both resources work at once.
+    hw = hwaccel_args() if n >= 2 else []
+
+    def run(k):
+        use_hw = hw if k == 0 else []
+        part = _scan_chunk(path, info, params, bounds[k], bounds[k + 1],
+                           lambda c: tick(k, c), cancel, use_hw)
+        if use_hw and not part[3] and not (cancel is not None and cancel.is_set()):
+            part = _scan_chunk(path, info, params, bounds[k], bounds[k + 1],   # GPU failed
+                               lambda c: tick(k, c), cancel, [])
+        return part
+
     with ThreadPoolExecutor(n) as ex:
-        parts = list(ex.map(lambda k: _scan_chunk(path, info, params, bounds[k], bounds[k + 1],
-                                                  lambda c: tick(k, c), cancel), range(n)))
+        parts = list(ex.map(run, range(n)))
     pts = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
     red = np.concatenate([p[1] for p in parts]) if parts else np.zeros(0)
     motion = np.concatenate([p[2] for p in parts]) if parts else np.zeros(0)
@@ -184,11 +198,13 @@ def analyze_video(path: str, params: DetectParams | None = None, progress=None,
                          frame_times, offset)
 
 
-def _scan_chunk(path, info, params, t0, t1, tick, cancel):
+def _scan_chunk(path, info, params, t0, t1, tick, cancel, hwaccel=()):
     """Decode frames with pts in [t0, t1) and measure them.
 
-    Returns (pts, red, motion) on ffmpeg's timeline. The chunk starts a
-    little early so the first frame's motion has a real predecessor.
+    Returns (pts, red, motion, complete) on ffmpeg's timeline. The chunk
+    starts a little early so the first frame's motion has a real
+    predecessor. The frames only feed a 320 px analysis image, so the
+    decoder may skip the deblocking filter (a few % faster).
     """
     import io
     import queue
@@ -202,6 +218,7 @@ def _scan_chunk(path, info, params, t0, t1, tick, cancel):
     scan = _Scanner(params, aw, ah)
     seek = [] if not np.isfinite(t0) else ["-ss", f"{max(0.0, t0 - 0.5):.6f}"]
     cmd = [find_ffmpeg(), "-hide_banner", "-nostats", "-loglevel", "info", "-nostdin",
+           *hwaccel, "-skip_loop_filter", "all", "-flags2", "fast",
            *seek, "-copyts", "-i", path, "-map", "0:v:0",
            "-fps_mode", "passthrough", "-vf", f"scale={aw}:{ah}:flags=area,showinfo=checksum=0",
            "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]
@@ -228,6 +245,7 @@ def _scan_chunk(path, info, params, t0, t1, tick, cancel):
     view = memoryview(buf)
     pts, red, motion = [], [], []
     count = 0
+    complete = False
     try:
         while True:
             if cancel is not None and cancel.is_set():
@@ -244,6 +262,7 @@ def _scan_chunk(path, info, params, t0, t1, tick, cancel):
             if t is None:
                 break
             if t >= t1:
+                complete = True
                 break
             r_, m_ = scan(np.frombuffer(buf, np.uint8).reshape(ah, aw, 3))
             count += 1
@@ -252,13 +271,16 @@ def _scan_chunk(path, info, params, t0, t1, tick, cancel):
             if t < t0:
                 continue                    # warm-up frame before this chunk
             pts.append(t); red.append(r_); motion.append(m_)
+        if not complete:                    # end of stream: fine unless ffmpeg failed
+            complete = proc.wait() == 0 and count > 0
     finally:
         proc.kill()
         proc.wait()
         proc.stdout.close()
         reader.join(timeout=5)
         proc.stderr.close()
-    return np.asarray(pts, float), np.asarray(red, float), np.asarray(motion, float)
+    return (np.asarray(pts, float), np.asarray(red, float), np.asarray(motion, float),
+            complete)
 
 
 def _analyze_video_cv(path: str, params: DetectParams | None = None, progress=None,

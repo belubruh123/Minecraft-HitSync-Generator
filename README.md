@@ -1,203 +1,290 @@
-# Hit-Sync: Minecraft PvP Montage Editor
+# Hit-Sync: Minecraft PvP montage maker
 
-Hit-Sync locks sword hits to the beat. It takes one gameplay recording and one song, and
-renders a montage with:
-- a short slow-mo intro (about 5 s) that ramps back to real time, with the first combo hit on the drop
-- only real combos: 10 or more hits in a steady rhythm; everything else is cut
-- a hit on every beat of the song's fixed tempo, from the drop to the end of the edit
-- your recording's own hit sounds, placed on the beat
-- letterbox bars during combos
+Drop in a gameplay recording and a song. Hit-Sync finds the song's beat and
+where the music really starts, finds your hits and combos, and makes a montage
+where every hit lands on the beat, with a slow-mo intro, montage effects and
+text. Windows and macOS (Linux works too).
 
-## Run
+## Start
+
+| | |
+|---|---|
+| **Windows** | Double-click `run_gui.bat` |
+| **macOS** | Double-click `run_gui.command` (the first time: right-click → Open) |
+| **Linux** | `./run_gui.sh` |
+
+The first start sets everything up by itself: a private Python environment
+with the requirements (a few minutes, once). You only need
+[Python 3.10+](https://www.python.org/downloads/). On Windows, tick "Add python.exe
+to PATH" when installing it. ffmpeg is included; a system ffmpeg is used if you
+have one.
+
+## Make a montage
+
+1. **Drop your video and a song** anywhere on the window. You can also click
+   the two cards at the top. Each file is analysed the moment you drop it.
+2. **Press Space** to watch the montage. **F** plays it fullscreen.
+3. **Export video** (top right) saves the .mp4.
+
+That's it. Everything below is optional.
+
+### The smart bar
+
+- **Tempo check** (e.g. `96.0 BPM ✓`): how sure the beat detection is. Click it
+  if the beat sounds off.
+- **Music starts**: the best guesses for where the song kicks in (e.g.
+  `0:20 Beat kicks in`, `1:00 Big moment`). Click one to use it, or pick by
+  ear (below).
+- **Style**: one-click looks.
+
+  | Style | Look |
+  |---|---|
+  | Clean | No effects |
+  | Montage (default) | Vibrant colours, light motion blur, a soft zoom punch on hits, flash between combos |
+  | Hype | Punchy colours, shake, flash and RGB split on hits, zoom transitions |
+  | Cinematic | Teal-orange colours, bars through the first combo, dip-to-black transitions |
+
+  Changing any of these settings yourself makes the style *Custom*.
+- **Bottom row**: *Hit volume*, *Music volume* and *Beats per hit* (Auto, ½, 1,
+  2). Auto picks from your hit speed, so a fast song gets a hit every other
+  beat and a slow one two per beat.
+
+### Pick the starts by listening and watching
+
+- **Song** tab: the song's waveform with its beats and bar lines. Play it and
+  press **✔ Music starts here (M)** where your first combo hit should land. It
+  snaps to the beat.
+- **Gameplay** tab: your raw recording with its own sound. Press **✔ Combat
+  starts here (M)** where the action should begin. The footage before it
+  becomes the slow-mo intro, and that combo opens the montage.
+
+If the beat sounds off, tick **Beat click** to hear a click on every detected
+beat. The fixes are in the Song tab:
+
+| Fix | What it does |
+|---|---|
+| Tap (T) | Tap along 8 times or more |
+| ½× / 2× | The tempo is half or double what it should be |
+| Shift ½ beat | The clicks sit between the beats |
+| ◀ 10 ms / 10 ms ▶ | The clicks are a little late or early |
+| Reset | Back to what was detected |
+
+### Combos panel
+
+Every real combo (10+ steady hits) is shown with a thumbnail and ★ rating.
+
+- **Drag** combos (or use ▲▼) to change the order.
+- **Tick** a combo to use it in the montage.
+- **★ Auto-pick best** uses the best combos that fit the song.
+- **Slow-mo lead-in**: the footage before that combo plays in slow motion
+  (with letterbox bars and a flash), and the combo still starts on the beat.
+- **✦ Hit effects**: choose which hits get the zoom/shake/flash/RGB effects.
+  Quick picks: All, None, Every 2nd, First & last. On the timeline, **E** toggles
+  a selected hit.
+
+### Text panel
+
+**＋ Add text at playhead** adds a YouTuber-style caption: bold, thick outline,
+shadow. For each caption you can:
+
+- type the text
+- choose **Top / Center / Bottom**, a style (YouTuber, Yellow, Red, Impact,
+  Minimal) and an animation (Pop, Slide, Fade, Typewriter)
+- set **Start here / End here** from the playhead, or drag the yellow bar's
+  edges on the timeline (they snap to beats)
+
+Add as many captions as you like, one after another.
+
+### Effects panel
+
+- **Flashy effects on part of the montage**: Flashy (beat strobe, glow, colour
+  boost, RGB and zoom pulses), Glow, RGB split, Strobe, Black & white, Shake,
+  Zoom pulse, Motion blur+. Choose where: 4 or 8 bars from the playhead, *the
+  combo at the playhead*, or *playhead to the end*. Each range has a strength
+  and shows on the timeline, where you can drag its edges.
+- **Hit effects**: zoom punch, shake, flash, RGB split, and *velocity* (slow on
+  each impact, fast in between).
+- **Look**: filter (Vibrant, Cinematic, Warm, Cool, Punchy, B&W, Vintage,
+  Night) and its strength, motion blur, vignette, bar pulse.
+- **Between combos**: cut, flash, zoom, whip or dip.
+- **Start and end**: fade from black or flash in; end with a cut, fade to
+  black or fade to white, each with its own length. The montage keeps playing
+  past the last hit so the fade never covers a hit.
+
+### More songs
+
+Drop more songs and they play back to back. Each song plays until its last
+loud bar. The next one fades in over about a bar, playing its own lead-up, and
+reaches *its* start point exactly on that bar: no gap, and the beat grid
+continues. Pick a song in the Song tab to set its start or fix its beat.
+
+### Letterbox and flash
+
+The cinematic bars show during the slow-mo intro (and slow-mo lead-ins). A
+quick flash marks the first hit, and the combos play full frame. Advanced →
+Letterbox can switch to "Intro + first combo", "Every combo" or off.
+
+### Timeline and Advanced
+
+**Timeline ▾** (bottom right) shows the detailed edit:
+
+- **MUSIC**: beats and bar lines.
+- **EDIT**: speeds, cuts, bars, captions and effects.
+- **VIDEO**: hits and combos.
+
+What you can do on it:
+
+- Double-click to add a beat or hit; right-click deletes one.
+- **S** splits a combo, **M** merges it with the one before.
+- The mouse wheel zooms.
+
+**⚙ Advanced** has every other setting, all with good defaults:
+
+- intro length and speed, lead-in length
+- beat grid overrides
+- combo rules and sync tolerance
+- hit detection sensitivity
+- hit sounds (your recording's own, Minecraft's from your install, or a
+  custom file)
+- letterbox
+- export quality and encoder
+
+| Key | Action |
+|---|---|
+| Space | Play / pause |
+| F | Fullscreen (Esc to leave) |
+| ← → | One beat back / forward |
+| M | Mark (Song / Gameplay tab) |
+| T | Tap tempo (Song tab) |
+| Ctrl/⌘ + S / O / E | Save project / open project / export |
+
+## Command line
 
 ```
-run_gui.bat                                   # desktop editor
-.venv\Scripts\python -m hitsync check         # verify dependencies + ffmpeg
-.venv\Scripts\python -m hitsync run pvp.mp4 song.mp3 -o montage.mp4 --drop 16
-.venv\Scripts\python -m unittest discover -s tests -t .               # tests
+python -m hitsync                                  # the app (drop files, or pass them)
+python -m hitsync beats song.mp3 --click check.wav # what was detected + a click track
+python -m hitsync run pvp.mp4 song1.mp3 song2.mp3 -o montage.mp4 --style hype \
+    --beats-per-hit auto --text "0:02-0:05=GG EZ@top" --effect "flashy=0:10-0:18" \
+    --fade-in black --fade-out white [--drop 20.4] [--dry-run] [--save-project p.json]
+python -m hitsync check                            # dependencies + ffmpeg
+python -m unittest discover -s tests -t .          # tests
+python tools/bench.py                              # speed benchmark
 ```
 
-Setup from scratch: `py -3.13 -m venv .venv && .venv\Scripts\pip install -r requirements.txt`.
-If there's no system ffmpeg, the tool uses the static binary that `imageio-ffmpeg` ships.
+`--text` and `--effect` times count from the start of the montage.
 
-## Workflow
+## How it works
 
-1. Pick the video and the music, then click **Analyze Media**. This finds the song's
-   fixed tempo, the drop, the hits, and the real combos.
-   - If the drop is wrong, click the MUSIC track where the music kicks in, then click
-     **Drop = Playhead**.
-   - If combat should start elsewhere, select the combo's first hit on the VIDEO track,
-     then click **Combat = Selected Hit**. The slow-mo intro range is resized to match.
-2. Check the markers on the timeline:
-   - **Double-click** to add a beat (MUSIC track) or a hit (VIDEO track). A new hit snaps
-     to the nearest detection peak.
-   - **Right-click** a marker to delete it.
-   - Select a hit, then press **S** to split the combo there or **M** to merge its combo
-     with the previous one.
-3. Click **Recalculate Alignment**. It runs in milliseconds from the markers in memory and
-   never re-reads the media. It also runs automatically while **Live** is ticked.
-4. Click **Play** (or press **Space**) to watch the edited montage in the preview, with
-   the music and hit sounds. Click the MUSIC or EDIT track to move the playhead; the
-   dashed playhead on the VIDEO track shows which moment of the source is on screen.
-5. Export with **File > Export Video As (.mp4)…** (Ctrl+E) or the **Export MP4…** button.
-   Your edits are saved separately with **File > Save Project (.json)** (Ctrl+S). Open a
-   saved project with Ctrl+O; the cached analysis is stored in it, so nothing is re-analyzed.
+### Beat grid (`music_grid.py`)
 
-Every slider has a number box next to it. Type an exact value and press Enter (or Tab, or
-click away) to apply it, or press Esc to undo. Typed values can go past the slider's range
-and aren't rounded to its steps (for example 101.25 BPM). Percent fields accept `25` or
-`25%`, and a comma works as the decimal point.
+Montage songs are made on a DAW grid with one exact tempo. So instead of
+following a beat tracker (the 3-3-2 marimba riff of *Shape of You* reads as
+128 BPM, or wanders off to 97), Hit-Sync searches the tempo and phase
+directly:
 
-## Static beat = a hit on every beat
+- **Tempo**: every candidate tempo folds the song's drum attacks onto a single
+  beat. The true tempo is the one where they stack up over the whole song; a
+  wrong one smears once the pattern repeats.
+- **Right multiple**: a tempo that is really the 8th-note level shows loud and
+  quiet beats alternating, so it loses to the real beat.
+- **Phase**: the phase comes from the loud kick and snare accents, so off-beat
+  hats can't flip it. It is then fitted to the attacks, which are measured on
+  the waveform to about ±1 ms.
+- **Downbeats**: the bar lines come from the kick plus chord changes.
+- **Live songs**: a song whose tempo wanders (a live band) is detected, and
+  the beat tracker follows it instead.
 
-With **Static beat** ticked (the default), every beat of the grid from the drop to the end
-of the montage has exactly one hit, locked on the beat. On the MUSIC track that shows as one
-unbroken chain of green triangles, with no gaps and no orange. What makes that true:
+### Music start (`sections.py`)
 
-- One hit per beat, always. **A hit on every beat** and **Beats per hit** are implied and
-  greyed out.
-- A hit never falls off the grid. A small timing error gets a micro ramp. A bigger one is
-  sped up or slowed down to fit the beat. A gap too long even for the fastest speed (for
-  example a missed detection) keeps a short tail and hard-cuts to the hit inside that beat.
-- The montage ends on the beat after the last hit, so there are no empty beats at the end.
-  The music fades out over that final beat only, never over the hits.
+Per bar, it measures kick activity, sub-bass loudness, snare/hat activity and
+overall loudness.
 
-Untick **Static beat** to get the dynamic grid back, with beats-per-hit spacing and
-tempo matching.
+- **Beat kicks in**: the first bar where the kick holds after a quieter
+  stretch.
+- **Drop**: the bar line where kick and bass rise and *stay* up. A snare-roll
+  build scores lower than the drop it leads into.
+- **Default**: the earliest strong moment.
+- **Slow-mo intro**: the whole song intro when it is short, otherwise 4 bars
+  (2 for slow songs). It never starts in silence.
 
-## Analysis speed and re-analysis
+### Edit (`sync_engine.py`)
 
-- **Only what changed is re-analyzed.** Once a pair is analyzed, picking a different
-  music file re-analyzes only the music (beats, grid, drop); your hits, combos and hit
-  edits stay. Picking a different video re-scans only the video (hits, combos); the beat
-  grid and a drop you set by hand stay. This runs automatically when you pick the new
-  file, and also when you click **Analyze Media**.
-- **Files you've analyzed before load instantly.** Results are cached per file (by path,
-  size and modification time) in `%LOCALAPPDATA%\HitSync\cache` (override with
-  `HITSYNC_CACHE`). Switching back to an earlier song or clip takes well under a second. An
-  edited file is analyzed again.
-- **Music and video are analyzed at the same time.**
-- **Speed on a 4:45 1440p Game Bar capture plus a 3:16 song:**
+The output timeline is the music timeline. The edit is a list of time-remap
+segments (speed ramps, cuts, slow-mo) built so that every hit lands exactly
+on its beat step:
 
-  | Step | Before | Now |
-  |---|---|---|
-  | Video scan | 103 s | 13 s |
-  | Music analysis | 21 s | 3.5 s |
-  | Full first analysis | ~124 s | ~18 s |
-  | Music changed only | ~124 s | ~3.5 s |
-  | Previously analyzed files | ~124 s | 0.07 s |
+- The combo plan (order, on/off, lead-ins), beats per hit and velocity curves
+  are applied here.
+- The slow-mo intro ramps into the first hit on the music start.
+- Reordered combos are reached by cuts.
 
-  The video scan is faster because ffmpeg decodes and shrinks the frames to 320 px in
-  native code, instead of OpenCV decoding full 1440p frames and resizing them in Python.
-  Music analysis is faster because the drum/harmonic split's median filters run on all
-  cores, with identical output.
+### Look (`effects.py`, `text_overlay.py`)
 
-## Export speed
+Everything is evaluated per output frame from the edit (hits, beats, cuts),
+so the preview and the export are identical.
 
-A 56 s montage from a 1440p capture exports in about 30–36 s. It used to take about
-190 s (8.7 fps); it now runs at 46–57 fps.
+- Filters are a colour lookup table plus a colour matrix.
+- Motion blur blends recent source frames, never across a cut.
+- Captions are rendered once as sprites.
+- Invisible effects cost nothing.
 
-- **GPU encoding:** **Encoder: auto** uses the GPU's H.264 encoder (AMD AMF, NVIDIA NVENC or
-  Intel Quick Sync) when one works on your machine. Otherwise it uses x264 on the CPU.
-  Choose **x264** to force CPU encoding (`--encoder x264` on the command line).
-- **Parallel parts:** the video renders as up to 3 consecutive parts at once, each with its
-  own decoder and encoder. The parts are then joined without re-encoding. The soundtrack
-  is mixed at the same time.
-- **Background decoding:** source frames are decoded ahead in a background thread, straight
-  into memory. Full-size frames travel as YUV, half the bytes of RGB.
-- **Cheaper slow-mo:** optical flow is computed at 640 px wide and only the final warp runs
-  at full resolution.
+### Preview (`preview_engine.py`)
 
-**Frame accuracy:** ffmpeg's "accurate" seek sometimes drops the wanted frame on
-variable-frame-rate captures. When it did, every frame after that seek came out one frame
-(33 ms) late: 2 of the 6 seeks in the test montage. Every decoded frame is now identified
-by its real timestamp instead of by counting frames, so a seek can't shift the footage.
-Renders with 1 part and with 3 parts are now frame-identical.
+- A background thread builds frames ahead of the playhead.
+- Before a cut that jumps back in the footage, a second decoder starts in
+  advance.
+- The sound card is the clock, so picture and sound never drift.
+- Frames are built at most 1280 px wide and the screen scales them, so
+  fullscreen stays smooth.
 
-## Hit sounds
+### Hits (`video_analysis.py`)
 
-Every hit placed in the edit gets a hit sound, in both the preview and the export.
+The onset of the red hurt tint in the centre of the screen, plus camera
+snaps, from a 320 px scan decoded by ffmpeg. With two chunks, one decodes on
+the GPU (when there is one) while the other uses the CPU.
 
-**`original`** (the default) uses each hit's own sound from your recording, kept whole:
-each hit plays the recorded audio from its attack up to the next hit, so the entire sound
-and anything right after it (crit, sweep) is kept. The attack is lined up exactly with the
-beat. The last hit of a combo rings out until the next combo's first hit starts. One volume
-is applied to every hit, so loud and quiet hits keep their natural balance.
+## Speed
 
-Screen recordings don't keep sound and picture in lockstep. In a Game Bar capture the hit
-sound came 30 ms to 350 ms before the red flash, and the gap changed from hit to hit. So
-the tool detects every distinct sound in the recording and pairs the hits with them in
-order, rather than searching a fixed window. If the recording has no audio track, the tool
-uses `classic` instead.
+Measured on a 4-core container, with a synthetic 60 s 1440p30 capture and a
+3-minute song (`tools/bench.py`):
 
-The other presets are read from your own Minecraft Java install
-(`%APPDATA%\.minecraft`); nothing from the game is bundled here.
+| Step | Before | Now |
+|---|---|---|
+| Music analysis (3 min song) | 5.6 s (10.7 s first run) | ~1 s |
+| Video scan (60 s 1440p) | 6.5 s | 5.8 s (+ GPU decode on your machine) |
+| Export, 79 s montage at 1440p, no effects | 136 s | 66 s |
+| Export, same montage, Montage look | – | ~100 s |
+| Preview frame building at 960×540, Montage look | – | ~80 fps (2.7× real time) |
 
-| Preset | Sound |
-|---|---|
-| `classic` | 1.8 PvP hurt sound (`damage/hit1-3`) |
-| `strong`, `crit`, `knockback` | 1.9+ attack sounds |
-| `custom` | any audio file you choose |
-| `off` | no hit sounds |
+On a normal PC export is faster: more cores, and the GPU encoder (NVIDIA, AMD,
+Intel, or Apple VideoToolbox) is used automatically.
 
-Like the game, each hit picks a random variant and a random pitch; turn that off with
-**Random pitch**. If no Minecraft install is found, a synthesized punch is used instead.
-Set `HITSYNC_MINECRAFT_DIR` to point at a non-standard install.
+Analysed files are cached per file (`%LOCALAPPDATA%\HitSync` on Windows,
+`~/Library/Caches/HitSync` on macOS, `~/.cache/HitSync` on Linux). Opening
+them again is instant.
 
-## How the alignment works (`hitsync/sync_engine.py`)
-
-The output timeline is the music timeline. The schedule is a list of time-remap segments
-that map output time to source time. A segment can also mark a hard cut.
-
-| Feature | Mechanism |
-|---|---|
-| Short intro | The montage starts **Intro length** (default 5 s, snapped to whole beats) before the drop, so the song before that is cut. The intro uses only the footage just before "combat begins" that fills those seconds at **Intro slow-mo speed** (about 2 s of video at 0.4x), so the video before that is cut too. Set the length to 0 to keep the whole music intro. |
-| Static beat | One tempo and phase is fitted to all the detected beats with a robust line fit. Beats are counted from the last beat known to be on the pulse, so a stretch where the tracker follows 1/8 notes (two detections per beat) is ignored instead of doubling the grid. The drop snaps to this grid. **BPM** and **Grid offset** override the fit. |
-| Real combos | Hits are grouped by rhythm: a gap more than ±30% (**Rhythm tolerance**) away from the combo's running hit period starts a new group. Only groups of at least **Min hits per combo** (default 10) make the edit; every other hit is dead footage and gets cut. |
-| Combo spacing | The average gap between hits in the real combos is compared with the beat to choose beats-per-hit (½, 1, 2, …). For example, a 0.60 s hit gap against a 0.594 s beat gives 1 hit per beat. |
-| A hit on every beat | Each hit goes exactly one step after the previous one, never skipping a beat. The next combo's first hit lands on the beat right after the previous combo's last hit: a short tail and a pre-roll share that one beat, with a hard cut between them. The intro ramps straight into the first combo hit, which lands exactly on the drop. |
-| Timing fixes | Within ±tolerance (default 80 ms), a micro speed-ramp (`ramp`) or trimming the late milliseconds (`trim`) locks the hit. Larger gaps are fixed by speeding up or slowing down between **Slowest** and **Fastest speed-ramp** (default 0.6–1.7×). |
-| Letterbox | Each combo with at least `min_combo_hits` hits gets bars. They ease in just before the first hit, stay while the combo lasts, and ease out when it breaks. |
-
-## Detection
-
-- **Beats:** librosa beat tracking, with each beat snapped to its backtracked onset attack
-  (±4 ms on synthetic audio). These beats then feed the static grid fit.
-- **Drop:** the grid beat with the largest jump in drum energy (percussive RMS). Vocals
-  or pads can mask the drop in a full-mix energy curve, so the drums are measured alone.
-- **Hits:** the onset of the red hurt tint in the centre of the screen, plus changes in
-  screen velocity (phase correlation). Hit times use the rising edge of the tint. Each
-  flash is normalized against the local red level, so a far-away opponent counts like a
-  close one. Hits closer than 0.4 s are merged, because Minecraft's damage invulnerability
-  lasts 0.5 s. A gap about twice the hit rhythm is searched again for a faint hit that was
-  missed. The raw signals are cached, so changing the sensitivity or clicking
-  **Re-detect Hits** doesn't decode the video again.
-
-## Layout
+## Files
 
 ```
 hitsync/
-  config.py          parameter dataclasses
-  models.py          beats/hits/combo editing (split, merge, delete, add)
-  beatgrid.py        static beat grid fit, subdivisions, tempo curve (numpy only)
-  audio_analysis.py  librosa: beats, onsets, RMS, drop detection
-  video_analysis.py  ffmpeg-piped scan: damage tint + screen velocity -> hits
-  analysis_cache.py  per-file on-disk cache of analysis results
-  sync_engine.py     edit-decision engine -> Schedule
-  audio_mix.py       soundtrack: music + original / Minecraft hit sounds
-  renderer.py        timestamp-exact frame source, remap (nearest/blend/flow), parallel encode
-  project.py         state, analysis orchestration, JSON save/load
-  cli.py             `python -m hitsync [gui|run|check]`
-  gui/app.py         customtkinter window
-  gui/timeline.py    interactive tk.Canvas timeline with playhead
-  gui/player.py      in-app playback (video + soundtrack)
-tests/               engine, rules, audio/VFR unit tests + end-to-end synthetic-media test
+  music_grid.py      beat grid: tempo/phase search, attacks, downbeats, confidence
+  sections.py        music start candidates, song end, automatic intro length
+  audio_analysis.py  AudioAnalysis (grid + sections + curves), beat tracker fallback
+  video_analysis.py  ffmpeg scan: hurt tint + screen motion -> hits
+  sync_engine.py     the edit: plan, intro, lead-ins, steps on the beat, letterbox
+  soundtrack.py      several songs as one music timeline (crossfades, grid)
+  audio_mix.py       soundtrack: music + hit sounds (recording / Minecraft / custom)
+  effects.py         filters, motion blur, hit effects, ranges, transitions, fades
+  text_overlay.py    captions (fonts in hitsync/assets/fonts, SIL OFL)
+  styles.py          Clean / Montage / Hype / Cinematic
+  renderer.py        frame-exact decoding, frame composition, parallel export
+  preview_engine.py  real-time playback (decode ahead, audio clock)
+  project.py         project state, analysis orchestration, save/load
+  cli.py             python -m hitsync [run|beats|check]
+  ui/                the Qt app (main window, panels, timeline, advanced settings)
+tests/               engine, beat grid, plan, effects, multi-song, preview, UI tests
+tools/bench.py       speed benchmark
 ```
 
-**Variable frame rate:** screen recorders such as Game Bar and OBS produce VFR video.
-Every time-to-frame lookup uses each frame's real timestamp. Frames are decoded through
-ffmpeg with timestamp-accurate seeking, adjusted for the video stream's start offset,
-because OpenCV's frame seeking returns the wrong frame on these files.
-
-The output audio is the music plus the hit sounds; the rest of the gameplay audio isn't
-mixed in.
+Fonts: Anton and Montserrat Black, under the SIL Open Font License (see
+`hitsync/assets/fonts/OFL.txt`).

@@ -2,8 +2,10 @@ numpy
 scipy
 librosa>=0.10
 opencv-python
-customtkinter
 pillow
 soundfile
+# desktop app (Qt) and preview sound (PortAudio: WASAPI on Windows, CoreAudio on macOS)
+PySide6-Essentials>=6.5
+sounddevice
 # Bundled static ffmpeg binary; a system ffmpeg on PATH takes precedence.
 imageio-ffmpeg

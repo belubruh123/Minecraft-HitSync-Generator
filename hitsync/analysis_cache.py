@@ -14,16 +14,26 @@ import os
 import tempfile
 
 # Bump when an analysis algorithm changes so old results aren't reused.
-VERSION = {"audio": 2, "video": 2}
+VERSION = {"audio": 3, "video": 2}
 MAX_ENTRIES = 40
 
 
 def cache_dir() -> str:
+    """Per-user cache folder: %LOCALAPPDATA% on Windows, ~/Library/Caches on
+    macOS, $XDG_CACHE_HOME (~/.cache) elsewhere; HITSYNC_CACHE overrides."""
     base = os.environ.get("HITSYNC_CACHE")
-    if not base:
-        root = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".cache")
-        base = os.path.join(root, "HitSync", "cache")
-    return base
+    if base:
+        return base
+    import sys
+
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return os.path.join(root, "HitSync", "cache")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Caches", "HitSync")
+    root = os.environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+    return os.path.join(root, "HitSync")
 
 
 def fingerprint(kind: str, path: str, **settings) -> str:

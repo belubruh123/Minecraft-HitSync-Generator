@@ -63,6 +63,7 @@ class SyncParams:
     # long before the drop (snapped to whole beats) and only the footage that
     # fills it in slow-mo is used. 0 = keep the whole music intro.
     intro_length: float = 5.0
+    intro_auto: bool = True         # intro length follows the song's own intro
 
     # --- Beat grid -----------------------------------------------------------
     static_grid: bool = True        # one constant tempo for the whole song
@@ -92,10 +93,20 @@ class SyncParams:
     pre_roll: float = 0.35          # source s kept before a combo's first hit
     post_roll: float = 0.35         # source s kept after a combo's last hit
     outro: float = 1.0              # source s kept after the final combo
-    transition: str = "cut"         # "cut" | "flash"
+    end_hold: float = 0.0           # s the montage keeps going after the last hit
+    transition: str = "cut"         # between combos: cut | flash | zoom | whip | dip
     flash_duration: float = 0.12
 
+    # --- Velocity edit / slow-mo lead-ins -------------------------------------
+    velocity: float = 0.0           # 0..0.9: slow on each impact, fast in between
+    lead_in_beats: int = 4          # length of a combo's slow-mo lead-in
+    lead_in_speed: float = 0.45     # its slow-mo speed
+
     # --- 3. Cinematic letterbox ----------------------------------------------
+    # slowmo = bars on the slow-mo intro and lead-ins only (flash, then full
+    # frame on the first hit) | first combo | combos | off
+    letterbox_mode: str = "slowmo"
+    intro_flash: bool = True        # quick white flash as each slow-mo part ends
     letterbox_enabled: bool = True
     letterbox_aspect: float = 2.39  # target aspect ratio when bars are fully in
     letterbox_fade: float = 0.25    # ease in/out duration (s)
@@ -121,16 +132,33 @@ class RenderParams:
     scale: float = 1.0              # output resolution scale
     interp: str = "flow"            # slow-mo frame synthesis: nearest|blend|flow
     crf: int = 18                   # quality (lower = better); hardware encoders map it
-    preset: str = "medium"          # x264 speed preset
+    preset: str = "faster"          # x264 speed preset (2x "medium", same size at crf 18)
     # "auto" = GPU encoder (NVIDIA/AMD/Intel) when one works, else x264 on the CPU
     encoder: str = "auto"           # auto | x264 | nvenc | amf | qsv
-    audio_fade_out: float = 1.5
+    audio_fade_out: float = 1.5     # music fade after the last hit (no end fade chosen)
+    # Start / end of the montage: none | black | white (the music fades too)
+    fade_in: str = "none"
+    fade_in_len: float = 0.6
+    fade_out: str = "none"
+    fade_out_len: float = 1.5
     # hit sounds (see audio_mix.HIT_SOUND_CHOICES)
     hit_sound: str = "original"     # original|off|classic|strong|crit|knockback|custom
     hit_sound_file: str = ""        # used when hit_sound == "custom"
     hit_volume: float = 0.8
     music_volume: float = 1.0
     hit_pitch_variation: bool = True
+    # --- look (see styles.py for the one-click presets) ----------------------
+    style: str = "clean"            # clean | montage | hype | cinematic | custom
+    filter: str = "none"            # effects.FILTERS
+    filter_strength: float = 0.7
+    vignette: float = 0.0           # 0..1 darker corners
+    motion_blur: float = 0.0        # 0..1 frames blended with the previous ones
+    hit_zoom: float = 0.0           # zoom punch on each (ticked) hit, e.g. 0.05
+    hit_shake: float = 0.0          # 0..1 screen shake on each hit
+    hit_flash: float = 0.0          # 0..1 white flash on each hit
+    hit_rgb: float = 0.0            # 0..1 RGB-split pulse on each hit
+    beat_pulse: float = 0.0         # 0..1 zoom pulse on every bar
+    hit_fx_default: bool = True     # hits not ticked either way get the effects
 
     to_dict = asdict
 

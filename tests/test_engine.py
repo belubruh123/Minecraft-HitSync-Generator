@@ -23,6 +23,7 @@ def legacy(**kw):
     kw.setdefault("intro_end", 9.5)
     kw.setdefault("drop_time", 8.0)
     kw.setdefault("intro_length", 0.0)       # whole music intro
+    kw.setdefault("letterbox_mode", "combos")  # bars on every combo
     return SyncParams(min_combo_len=1, fill_every_beat=False, static_grid=False, **kw)
 
 

@@ -109,8 +109,8 @@ class ComboRuleTests(unittest.TestCase):
         self.assertEqual(s.beats_per_hit, 1.0)
 
     def test_static_beat_is_one_unbroken_chain_of_locked_hits(self):
-        """Static beat: every beat from the drop to the end has a locked hit,
-        whatever the other settings say and however sloppy the rhythm."""
+        """Static beat: every step (beats per hit) from the drop to the end
+        has a locked hit, however sloppy the rhythm."""
         hits = (combo(20, 12, period=2 * PERIOD, jitter=0.03, seed=7)   # slow player
                 + combo(60, 11, jitter=0.12, seed=8)                     # sloppy player
                 + combo(90, 10, seed=9)[:7] + [95.5, 96.1, 96.7])        # a missed hit
@@ -120,20 +120,22 @@ class ComboRuleTests(unittest.TestCase):
         drop = GRID[27]
         for extra in ({}, {"fill_every_beat": False}, {"combo_spacing": "2"},
                       {"combo_spacing": "0.5"}, {"jitter_tolerance_ms": 0.0},
-                      {"lock_mode": "trim"}, {"ramp_max_speed": 1.1}):
+                      {"lock_mode": "trim"}, {"ramp_max_speed": 1.1}, {"velocity": 0.6}):
             p = SyncParams(intro_start=14.0, intro_end=20.0, drop_time=drop, combo_gap=2.0,
                            combo_regularity=0.6, **extra)
+            step = float(extra.get("combo_spacing", 1))
             s = build_schedule(m, p, 120, 200)
             placed = [pl for pl in s.placements if pl.out_t is not None]
             self.assertTrue(placed, extra)
             self.assertTrue(all(pl.locked for pl in placed), extra)          # all green
             outs = np.sort([pl.out_t for pl in placed])
-            idx = np.round((outs - GRID[0]) / PERIOD)
-            self.assertLess(np.max(np.abs(outs - (GRID[0] + idx * PERIOD))), 1e-6, extra)
+            idx = np.round((outs - drop) / (PERIOD * step))           # steps from the drop
+            self.assertLess(np.max(np.abs(outs - (drop + idx * PERIOD * step))), 1e-6, extra)
             self.assertAlmostEqual(outs[0], drop, places=6)
             self.assertTrue(np.all(np.diff(idx) == 1), (extra, np.diff(idx)))  # no gap
-            # the montage ends on the beat after the last hit: no empty beats
-            self.assertAlmostEqual(s.end, outs[-1] + PERIOD, places=6)
+            # the montage ends one step after the last hit: no empty beats
+            self.assertAlmostEqual(s.end, outs[-1] + PERIOD * step, places=6)
+            self.assertEqual(s.beats_per_hit, step)
 
 
 class ShortIntroTests(unittest.TestCase):

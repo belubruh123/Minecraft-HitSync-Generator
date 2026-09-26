@@ -47,7 +47,7 @@ class FrameSource:
 
     RESTART_SECONDS = 3.0   # forward jumps longer than this re-seek instead of decoding through
 
-    def __init__(self, path: str, info: VideoInfo, cache_size: int = 6, frame_times=None,
+    def __init__(self, path: str, info: VideoInfo, cache_size: int = 10, frame_times=None,
                  size: tuple[int, int] | None = None, pts_offset: float = 0.0):
         self.path = path
         self.pts_offset = float(pts_offset or 0.0)
@@ -202,7 +202,7 @@ class FrameSource:
                 self.n = max(1, min(self.n, self.pos + 1))   # stream ended early
                 break
             self.pos, frame = item
-            if self.pos >= idx - 1:       # keep the pair needed for blending
+            if self.pos > idx - self.cache_size:   # recent frames: blending / motion blur
                 self._remember(self.pos, frame)
         if idx in self.cache:
             frame = self.cache[idx]
@@ -314,21 +314,72 @@ def apply_flash(frame: np.ndarray, amount: float) -> np.ndarray:
     return cv2.addWeighted(frame, 1.0 - amount, np.full_like(frame, 255), amount, 0.0)
 
 
+def _look(schedule: Schedule, rparams: RenderParams):
+    """The montage look for this schedule + settings (built once, cached)."""
+    from .effects import Look
+
+    key = tuple(sorted(rparams.to_dict().items()))
+    cache = getattr(schedule, "_looks", None)
+    if cache is None:
+        cache = schedule._looks = {}
+    look = cache.get(key)
+    if look is None:
+        fx, ranges, texts = getattr(schedule, "overlays", (None, (), ()))
+        look = cache[key] = Look(schedule, rparams, fx, ranges, texts)
+        while len(cache) > 4:
+            cache.pop(next(iter(cache)))
+    return look
+
+
+def _fetch(source: FrameSource, schedule: Schedule, t: float, src_t: float, speed: float,
+           mode: str, n: int, fps: float):
+    """The source frame at t; with motion blur, the last ``n`` source frames
+    blended (newest weighted most), never reaching back across a cut."""
+    if n <= 1:
+        return source.frame_at(src_t, mode)
+    seg = schedule.segment_at(t)
+    lo = seg.src_start if seg is not None else 0.0
+    step = max(1.0 / max(source.fps, 1.0), speed / max(fps, 1.0) / n)
+    times = sorted({max(lo, src_t - i * step) for i in range(n)})    # oldest first
+    frames = [source.frame_at(tt, "nearest") for tt in times]
+    acc, wsum = None, 0.0
+    for k, f in enumerate(frames):
+        w = math.exp(-0.7 * (len(frames) - 1 - k))
+        if acc is None:
+            acc, wsum = f, w
+        else:
+            acc = cv2.addWeighted(acc, wsum / (wsum + w), f, w / (wsum + w), 0.0)
+            wsum += w
+    return acc
+
+
 def compose_frame(source: FrameSource, schedule: Schedule, t: float, rparams: RenderParams,
-                  size: tuple[int, int] | None = None) -> np.ndarray:
-    """Build one output frame at output time ``t`` (also used for GUI preview)."""
+                  size: tuple[int, int] | None = None, fps: float = 30.0,
+                  fast: bool = False) -> np.ndarray:
+    """Build one output frame at output time ``t`` (also used for preview).
+
+    ``fast`` (real-time preview) caps motion-blur samples."""
     src_t = schedule.src_time(t)
     speed = schedule.speed_at(t)
-    mode = rparams.interp if speed < 0.9 else "nearest"
-    frame = source.frame_at(src_t, mode)
-    resized = bool(size) and (frame.shape[1], frame.shape[0]) != size
-    if resized:
-        frame = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-    bars = schedule.letterbox_amount(t)
-    if bars > 1e-3 and not resized:
-        frame = frame.copy()        # decoded source frames are cached: never draw on them
-    frame = apply_letterbox(frame, bars, schedule.params.letterbox_aspect)
-    return apply_flash(frame, schedule.flash_amount(t))
+    # optical flow only pays off in the slow-mo intro / lead-ins; a combo
+    # stretched onto the beat or a velocity dip blends neighbouring frames
+    seg = schedule.segment_at(t)
+    slowmo = seg is not None and seg.kind in ("intro", "leadin")
+    if rparams.interp == "nearest" or speed >= 0.9:
+        mode = "nearest"
+    elif slowmo and speed < 0.65:
+        mode = rparams.interp
+    else:
+        mode = "blend"
+    look = _look(schedule, rparams)
+    n = look.blur_samples(t, speed)
+    if fast:
+        n = min(n, 3)
+    frame = _fetch(source, schedule, t, src_t, speed, mode, n, fps)
+    if size and (frame.shape[1], frame.shape[0]) != tuple(size):
+        frame = cv2.resize(frame, tuple(size), interpolation=cv2.INTER_AREA)
+    bars = (schedule.letterbox_amount(t), schedule.params.letterbox_aspect)
+    return look.finish(frame, t, bars)
 
 
 def render(video_path: str, music_path: str, out_path: str, schedule: Schedule,
@@ -477,7 +528,8 @@ def _render_part(video_path, info, schedule, rparams, fps, size, k0, k1, part_pa
                     raise RenderCancelled()
                 if broken.is_set():
                     break
-                frames.put(compose_frame(source, schedule, schedule.start + k / fps, rparams, size))
+                frames.put(compose_frame(source, schedule, schedule.start + k / fps, rparams, size,
+                                         fps))
                 if (k - k0) % 10 == 0:
                     tick(k - k0)
             tick(k1 - k0)
