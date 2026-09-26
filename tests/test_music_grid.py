@@ -58,6 +58,12 @@ class GridTests(unittest.TestCase):
         ma, beats, bars, secs, info = analyse(sm.edm_like)
         self.assertOnBeats(ma, beats, info)
 
+    def test_offbeat_hats_do_not_flip_the_phase(self):
+        # half the song is an intro of off-beat hats only: the loud kicks
+        # of the drop still decide where the beat is
+        ma, beats, bars, secs, info = analyse(sm.edm_like, duration=60.0)
+        self.assertOnBeats(ma, beats, info)
+
     def test_backbeat_swing_silence_and_dnb(self):
         for kw in (dict(), dict(bpm=88, swing=0.17, seed=5), dict(bpm=123, lead_silence=3.3),
                    dict(bpm=174, seed=7)):

@@ -663,6 +663,11 @@ class SyncEngine:
             end_src = min(vid_end, src_t + extra)
             outs, srcs = self._natural(out_t, src_t, end_src)
             b = self._next_step(out_t) if self.fill and ordered else None
+            if b is not None and p.end_hold > 0:
+                # an end fade: keep playing past the last hit (to a beat)
+                later = self.beats[self.beats >= out_t + p.end_hold - 1e-3]
+                if len(later):
+                    b = max(b, float(later[0]))
             if b is not None:
                 # Every step holds a hit, so the montage ends on the step
                 # after the last one: no empty beats at the end.

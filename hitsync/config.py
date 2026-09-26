@@ -93,6 +93,7 @@ class SyncParams:
     pre_roll: float = 0.35          # source s kept before a combo's first hit
     post_roll: float = 0.35         # source s kept after a combo's last hit
     outro: float = 1.0              # source s kept after the final combo
+    end_hold: float = 0.0           # s the montage keeps going after the last hit
     transition: str = "cut"         # "cut" | "flash"
     flash_duration: float = 0.12
 
@@ -134,7 +135,12 @@ class RenderParams:
     preset: str = "faster"          # x264 speed preset (2x "medium", same size at crf 18)
     # "auto" = GPU encoder (NVIDIA/AMD/Intel) when one works, else x264 on the CPU
     encoder: str = "auto"           # auto | x264 | nvenc | amf | qsv
-    audio_fade_out: float = 1.5
+    audio_fade_out: float = 1.5     # music fade after the last hit (no end fade chosen)
+    # Start / end of the montage: none | black | white (the music fades too)
+    fade_in: str = "black"
+    fade_in_len: float = 0.6
+    fade_out: str = "black"
+    fade_out_len: float = 1.5
     # hit sounds (see audio_mix.HIT_SOUND_CHOICES)
     hit_sound: str = "original"     # original|off|classic|strong|crit|knockback|custom
     hit_sound_file: str = ""        # used when hit_sound == "custom"

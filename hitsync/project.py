@@ -41,6 +41,13 @@ class Project:
     # only the music (or only the video) re-analyses just that file.
     audio_key: str = ""
     video_key: str = ""
+    # Songs 2, 3, ...: each fades in at its own start point (its drop) when
+    # the previous one ends. Their analyses/keys/starts are index-aligned.
+    extra_music: list = field(default_factory=list)
+    extra_audio: list = field(default_factory=list)
+    extra_keys: list = field(default_factory=list)
+    extra_starts: list = field(default_factory=list)     # song s; < 0 = automatic
+    grid_fix: dict = field(default_factory=dict)         # song index -> [bpm, offset ms]
 
     # ------------------------------------------------------------ analysis
     @property
@@ -53,10 +60,31 @@ class Project:
 
     @property
     def music_duration(self) -> float:
+        tl = getattr(self, "_tl", None)
+        if tl is not None:
+            return tl.duration
         return self.audio.duration if self.audio else 0.0
+
+    @property
+    def music_paths(self) -> list:
+        return [self.music_path] + list(self.extra_music)
+
+    def music_source(self):
+        """What the soundtrack plays: the song path, or the multi-song timeline."""
+        return getattr(self, "_tl", None) or self.music_path
 
     def current_audio_key(self) -> str:
         return analysis_cache.fingerprint("audio", self.music_path)
+
+    def _extra_key(self, k: int) -> str:
+        return analysis_cache.fingerprint("audio", self.extra_music[k])
+
+    def _sync_extra_lists(self):
+        n = len(self.extra_music)
+        for name, fill in (("extra_audio", None), ("extra_keys", ""), ("extra_starts", -1.0)):
+            lst = getattr(self, name)
+            del lst[n:]
+            lst.extend([fill] * (n - len(lst)))
 
     def current_video_key(self) -> str:
         d = self.detect
@@ -65,7 +93,10 @@ class Project:
 
     def stale(self) -> tuple[bool, bool]:
         """(music needs analysis, video needs analysis)."""
-        return (self.audio is None or self.audio_key != self.current_audio_key(),
+        self._sync_extra_lists()
+        extra = any(a is None or self.extra_keys[k] != self._extra_key(k)
+                    for k, a in enumerate(self.extra_audio))
+        return (self.audio is None or self.audio_key != self.current_audio_key() or extra,
                 self.video is None or self.video_key != self.current_video_key())
 
     def analyze(self, progress=None, cancel: threading.Event | None = None,
@@ -86,6 +117,7 @@ class Project:
             redo_only = True
         else:
             redo_only = False
+        self._sync_extra_lists()
         akey, vkey = self.current_audio_key(), self.current_video_key()
         frac = {"a": 0.0, "v": 0.0}
         weight = {"a": 0.2 if need_v else 1.0, "v": 0.8 if need_a else 1.0}
@@ -97,16 +129,29 @@ class Project:
                                                if (need_a if k == "a" else need_v)))
             return cb
 
-        def do_audio():
-            cached = None if force else analysis_cache.load(akey)
+        def load_or_analyze(path, key, cb):
+            cached = None if force else analysis_cache.load(key)
             if cached:
                 try:
                     return AudioAnalysis.from_dict(cached)
                 except (KeyError, TypeError, ValueError):
                     pass
-            a = analyze_audio(self.music_path, sub("a", "music"))
-            analysis_cache.save(akey, a.to_dict())
+            a = analyze_audio(path, cb)
+            analysis_cache.save(key, a.to_dict())
             return a
+
+        def do_audio():
+            a = load_or_analyze(self.music_path, akey, sub("a", "music"))
+            extras = []
+            for k, path in enumerate(self.extra_music):
+                key = self._extra_key(k)
+                if not force and self.extra_audio[k] is not None and self.extra_keys[k] == key:
+                    extras.append((self.extra_audio[k], key))
+                elif os.path.isfile(path):
+                    extras.append((load_or_analyze(path, key, lambda *_: None), key))
+                else:
+                    extras.append((None, ""))
+            return a, extras
 
         def do_video():
             cached = None if force else analysis_cache.load(vkey)
@@ -130,7 +175,9 @@ class Project:
         if cancel is not None and cancel.is_set():
             return False, False
         if audio is not None:
-            self.audio, self.audio_key = audio, akey
+            (self.audio, extras), self.audio_key = audio, akey
+            self.extra_audio = [a for a, _ in extras]
+            self.extra_keys = [k for _, k in extras]
             self.apply_beat_grid()
             self.auto_drop()
         if video is not None:
@@ -141,27 +188,112 @@ class Project:
             return False, False
         return need_a, need_v
 
-    def apply_beat_grid(self):
-        """Beats on the timeline = the song's constant grid.
+    def _song(self, k: int):
+        return self.audio if k == 0 else (self.extra_audio[k - 1]
+                                          if k - 1 < len(self.extra_audio) else None)
 
-        The grid is measured from the audio itself (tempo, phase, bar lines).
-        ``bpm_override`` forces a tempo, ``grid_offset_ms`` nudges the phase.
-        Songs whose tempo wanders (or the dynamic mode) use tracked beats.
+    def _fix(self, k: int) -> tuple[float, float]:
+        if k == 0:
+            return self.sync.bpm_override, self.sync.grid_offset_ms
+        bpm, off = self.grid_fix.get(k, (0.0, 0.0))
+        return float(bpm), float(off)
+
+    def _set_fix(self, k: int, bpm: float, offset_ms: float):
+        if k == 0:
+            self.sync.bpm_override, self.sync.grid_offset_ms = bpm, offset_ms
+        else:
+            self.grid_fix[k] = [bpm, offset_ms]
+        self.apply_beat_grid()
+
+    def song_grid(self, k: int = 0):
+        """(beats, downbeats, bpm) of song k on its own clock.
+
+        The grid is measured from the audio itself (tempo, phase, bar lines);
+        a forced tempo / phase nudge (beat-fix tools) applies per song. Songs
+        whose tempo wanders (or the dynamic mode) use tracked beats.
         """
+        a = self._song(k)
+        bpm, off = self._fix(k)
+        if self.sync.static_grid and not (a.grid.drift and bpm <= 0):
+            g = a.grid_for(bpm, off / 1000.0)
+            beats = g.beats(a.duration)
+            return beats, beats[g.is_downbeat(beats)], g.bpm
+        beats = np.asarray(a.beats, float)
+        bpm = 60.0 / float(np.median(np.diff(beats))) if len(beats) > 1 else 0.0
+        return beats, beats[::4], bpm
+
+    def apply_beat_grid(self):
+        """Beats on the timeline: song 1's grid, continued by each next song's
+        grid from the moment it takes over."""
         if self.audio is None:
             return
-        s, a = self.sync, self.audio
-        if s.static_grid and not (a.grid.drift and s.bpm_override <= 0):
-            g = a.grid_for(s.bpm_override, s.grid_offset_ms / 1000.0)
-            beats = g.beats(a.duration)
-            self.markers.set_beats(beats)
-            self.downbeats = [float(b) for b in beats[g.is_downbeat(beats)]]
-            self.grid_bpm = g.bpm
+        b0, d0, bpm0 = self.song_grid(0)
+        self.grid_bpm = bpm0
+        self._tl = self._build_timeline(b0, d0)
+        if self._tl is None:
+            beats, downs = b0, d0
         else:
-            beats = a.beats
-            self.markers.set_beats(beats)
-            self.downbeats = [float(b) for b in beats[::4]]
-            self.grid_bpm = 60.0 / float(np.median(np.diff(beats))) if len(beats) > 1 else 0.0
+            beats, downs = self._tl.beats(), self._tl.downbeats()
+        self.markers.set_beats(beats)
+        self.downbeats = [float(b) for b in downs]
+
+    def _build_timeline(self, b0, d0):
+        from .soundtrack import MusicTimeline, Song
+
+        self._sync_extra_lists()
+        if not any(a is not None for a in self.extra_audio):
+            return None
+        a0 = self.audio
+        end0 = a0.sections.song_end or a0.duration
+        if end0 < self.sync.drop_time + 10.0:          # song 1 must carry the start
+            end0 = a0.duration
+        if len(d0):                                    # hand over on a bar line
+            end0 = float(d0[np.argmin(np.abs(d0 - end0))])
+        songs = [Song(self.music_path, a0.duration, 0.0, end0, b0, d0)]
+        for k, a in enumerate(self.extra_audio, start=1):
+            if a is None:
+                continue
+            bk, dk, _ = self.song_grid(k)
+            songs.append(Song(self.extra_music[k - 1], a.duration, self.song_start(k, bk),
+                              a.sections.song_end or a.duration, bk, dk))
+        return MusicTimeline(songs)
+
+    def timeline(self):
+        return getattr(self, "_tl", None)
+
+    def song_start(self, k: int, beats=None) -> float:
+        """Where song k (k >= 1) starts when it takes over, on its own clock."""
+        a = self._song(k)
+        t = self.extra_starts[k - 1] if k - 1 < len(self.extra_starts) else -1.0
+        if t is None or t < 0:
+            t = a.sections.best
+        if beats is None:
+            beats = self.song_grid(k)[0]
+        return float(beats[np.argmin(np.abs(np.asarray(beats) - t))]) if len(beats) else t
+
+    def set_song_start(self, k: int, t: float) -> float:
+        """'Music starts here' for song k (song 1: the drop)."""
+        if k == 0:
+            return self.set_drop(t)
+        self._sync_extra_lists()
+        self.extra_starts[k - 1] = float(t)
+        self.apply_beat_grid()
+        return self.song_start(k)
+
+    def add_song(self, path: str):
+        self.extra_music.append(path)
+        self._sync_extra_lists()
+
+    def remove_song(self, k: int):
+        """Remove song k >= 1 (song 1 is replaced, not removed)."""
+        if 1 <= k <= len(self.extra_music):
+            for name in ("extra_music", "extra_audio", "extra_keys", "extra_starts"):
+                lst = getattr(self, name)
+                if k - 1 < len(lst):
+                    del lst[k - 1]
+            self.grid_fix = {(j if j < k else j - 1): v for j, v in self.grid_fix.items()
+                             if j != k}
+            self.apply_beat_grid()
 
     @property
     def beat_period(self) -> float:
@@ -169,44 +301,41 @@ class Project:
         return float(np.median(np.diff(b))) if len(b) > 1 else 0.5
 
     # -------------------------------------------------------- beat fixes
-    def set_tempo_factor(self, factor: float):
+    def set_tempo_factor(self, factor: float, song: int = 0):
         """Half / double the grid tempo (the detector picked the wrong level)."""
-        if self.grid_bpm > 0:
-            self.sync.bpm_override = self.grid_bpm * factor
-            self.apply_beat_grid()
+        _, _, bpm = self.song_grid(song)
+        if bpm > 0:
+            self._set_fix(song, bpm * factor, self._fix(song)[1])
 
-    def shift_half_beat(self):
+    def shift_half_beat(self, song: int = 0):
         """The grid sits on the off-beats: move it by half a beat."""
-        half = self.beat_period / 2 * 1000.0
-        self.sync.grid_offset_ms = (self.sync.grid_offset_ms + half) % (2 * half)
-        self.apply_beat_grid()
+        beats = self.song_grid(song)[0]
+        half = float(np.median(np.diff(beats))) / 2 * 1000.0 if len(beats) > 1 else 250.0
+        bpm, off = self._fix(song)
+        self._set_fix(song, bpm, (off + half) % (2 * half))
 
-    def nudge_grid(self, ms: float):
-        self.sync.grid_offset_ms += ms
-        self.apply_beat_grid()
+    def nudge_grid(self, ms: float, song: int = 0):
+        bpm, off = self._fix(song)
+        self._set_fix(song, bpm, off + ms)
 
-    def tap_tempo(self, taps) -> bool:
+    def tap_tempo(self, taps, song: int = 0) -> bool:
         """Tempo and phase from times tapped along with the music."""
         from .music_grid import tap_tempo
 
         res = tap_tempo(taps)
-        if res is None or self.audio is None:
+        a = self._song(song)
+        if res is None or a is None:
             return False
         bpm, phase = res
-        self.sync.bpm_override = round(bpm, 2)
-        self.sync.grid_offset_ms = 0.0
-        g = self.audio.grid_for(self.sync.bpm_override)
+        bpm = round(bpm, 2)
+        g = a.grid_for(bpm)
         # tapped phase wins over the fitted one when they disagree by > 40 ms
         d = (phase - g.phase + g.period / 2) % g.period - g.period / 2
-        if abs(d) > 0.04:
-            self.sync.grid_offset_ms = d * 1000.0
-        self.apply_beat_grid()
+        self._set_fix(song, bpm, d * 1000.0 if abs(d) > 0.04 else 0.0)
         return True
 
-    def reset_grid(self):
-        self.sync.bpm_override = 0.0
-        self.sync.grid_offset_ms = 0.0
-        self.apply_beat_grid()
+    def reset_grid(self, song: int = 0):
+        self._set_fix(song, 0.0, 0.0)
 
     def redetect_hits(self):
         """Re-run peak picking on cached signals (no media decoding)."""
@@ -329,6 +458,9 @@ class Project:
         """Where the montage music can run to (end of the last song)."""
         if self.audio is None:
             return max(self.markers.beats, default=0.0)
+        tl = self.timeline()
+        if tl is not None:
+            return tl.duration
         end = self.audio.sections.song_end or self.audio.duration
         return min(self.audio.duration, max(end, self.sync.drop_time))
 
@@ -389,6 +521,8 @@ class Project:
         vd = self.video_duration or (max((h.t for h in self.markers.hits), default=0.0) + 5)
         md = self.music_duration or (max(self.markers.beats, default=0.0) + 5)
         plan = self.engine_plan() if self.markers.hits else None
+        r = self.render_params
+        self.sync.end_hold = r.fade_out_len if r.fade_out not in ("", "none") else 0.0
         self.schedule = build_schedule(self.markers, self.sync, vd, md, plan=plan,
                                        downbeats=self.downbeats)
         return self.schedule
@@ -400,7 +534,7 @@ class Project:
             raise RuntimeError("Analyze the media first.")
         sched = self.schedule or self.recalculate()
         out = out_path or self.output_path or default_output_path(self.video_path)
-        return render(self.video_path, self.music_path, out, sched, self.video.info,
+        return render(self.video_path, self.music_source(), out, sched, self.video.info,
                       self.render_params, progress, cancel, self.video.frame_times,
                       self.video.pts_offset or 0.0)
 
@@ -415,6 +549,10 @@ class Project:
             "markers": self.markers.to_dict(), "downbeats": list(self.downbeats),
             "combo_plan": [c.to_dict() for c in self.combo_plan],
             "plan_custom": self.plan_custom,
+            "extra_music": list(self.extra_music), "extra_starts": list(self.extra_starts),
+            "extra_keys": list(self.extra_keys),
+            "extra_audio": [a.to_dict() if a is not None else None for a in self.extra_audio],
+            "grid_fix": {str(k): v for k, v in self.grid_fix.items()},
             "audio_key": self.audio_key, "video_key": self.video_key,
             "audio": self.audio.to_dict() if self.audio else None,
             "video": self.video.to_dict() if self.video else None,
@@ -443,6 +581,19 @@ class Project:
         p.downbeats = list(d.get("downbeats") or p.markers.beats[::4])
         p.combo_plan = [ComboChoice.from_dict(c) for c in d.get("combo_plan", [])]
         p.plan_custom = bool(d.get("plan_custom", False))
+        p.extra_music = list(d.get("extra_music", []))
+        p.extra_starts = [float(x) for x in d.get("extra_starts", [])]
+        p.extra_keys = list(d.get("extra_keys", []))
+        p.extra_audio = []
+        for a in d.get("extra_audio", []):
+            try:
+                p.extra_audio.append(AudioAnalysis.from_dict(a) if a else None)
+            except (KeyError, TypeError, ValueError):
+                p.extra_audio.append(None)
+        p.grid_fix = {int(k): list(v) for k, v in d.get("grid_fix", {}).items()}
+        p._sync_extra_lists()
+        if p.audio is not None and p.extra_music:
+            p._tl = p._build_timeline(*p.song_grid(0)[:2])
         if d.get("video"):
             p.video = VideoAnalysis.from_dict(d["video"])
             p.video_key = d.get("video_key") or p.current_video_key()

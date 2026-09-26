@@ -136,6 +136,10 @@ def spectral_features(y: np.ndarray, sr: int = SR, hop: int = HOP,
     # flux would also fire on faint transients in an otherwise empty band)
     mag = np.sqrt(bands[:, groups["sub"]]).sum(axis=1)
     flux["kick"] = np.clip(np.diff(mag, prepend=mag[:1]), 0, None)
+    # loudness-weighted onsets over all bands: a kick or snare counts for
+    # much more than a quiet hat (the log flux treats them alike)
+    allmag = np.sqrt(bands)
+    flux["energy"] = np.clip(np.diff(allmag, axis=0, prepend=allmag[:1]), 0, None).sum(axis=1)
     return Spectral(sr, hop, n, flux, level, chroma)
 
 
@@ -324,7 +328,7 @@ def estimate_grid(onset_t: np.ndarray, onset_w: np.ndarray, beat_t: np.ndarray,
         cands = cands[:4]
     P = 60.0 / chosen
     period, phase, conf, drift = _fit_line(beat_t, beat_w, P, fixed=bpm > 0,
-                                           duration=duration)
+                                           duration=duration, phase_w=accent_w)
     if bpm <= 0:
         # A steady song folds as well over the whole song as over 6 s
         # windows; a live, wandering tempo only lines up locally.
@@ -356,10 +360,13 @@ def _level_score(bpm, beat_t, beat_w, accent_w) -> float:
     return float(max(sc[0], 1e-3) * alt)
 
 
-def _fit_line(times, weights, P, fixed: bool, duration: float, iters: int = 5):
+def _fit_line(times, weights, P, fixed: bool, duration: float, iters: int = 5,
+              phase_w=None):
     """Robust weighted line fit t_k = phase + period * k through the attacks
-    nearest each grid point. Returns (period, phase, confidence, drift)."""
-    _, ph = _fold_scores(times, weights, [P], 0.03, None)
+    nearest each grid point. The starting phase comes from the loud accents
+    (``phase_w``), so off-beat hats can't pull the grid onto the off-beats.
+    Returns (period, phase, confidence, drift)."""
+    _, ph = _fold_scores(times, weights if phase_w is None else phase_w, [P], 0.03, None)
     phase = float(ph[0])
     period = P
     tol = min(0.07, P / 5)
@@ -495,8 +502,10 @@ def analyze(y: np.ndarray, sr: int = SR, bpm: float = 0.0, progress=None) -> Mus
 
     low, high = strength("low"), strength("high")
     drum_w = low + 0.8 * high + 0.25 * strength("air")
+    loud = strength("energy")
     report("Tempo", 0.6)
-    grid = estimate_grid(attacks, s_full, attacks, drum_w, duration, bpm, (low + high) ** 2)
+    grid = estimate_grid(attacks, s_full, attacks, drum_w, duration, bpm,
+                         (low + high) ** 2 * (0.25 + loud))
     grid.downbeat = find_downbeat(grid, spec, duration)
     report("Levels", 0.9)
     k = 2                                   # ~23 ms curve resolution
