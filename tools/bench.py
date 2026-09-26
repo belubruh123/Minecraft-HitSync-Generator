@@ -39,6 +39,7 @@ def main():
     ap.add_argument("--height", type=int, default=1440)
     ap.add_argument("--keep", help="reuse/keep generated media in this folder")
     ap.add_argument("--no-export", action="store_true")
+    ap.add_argument("--style", default="clean", help="look used for the export timing")
     args = ap.parse_args()
     d = args.keep or tempfile.mkdtemp(prefix="hitsync_bench_")
     os.makedirs(d, exist_ok=True)
@@ -69,7 +70,10 @@ def main():
     if not args.no_export:
         from hitsync.project import Project
 
+        from hitsync.styles import apply_style
+
         p = Project(video_path=clip, music_path=song, output_path=os.path.join(d, "out.mp4"))
+        apply_style(p, args.style)
         p.sync.min_combo_len = 4
         p.analyze()
         sched = p.recalculate()
@@ -77,7 +81,7 @@ def main():
         p.render()
         te = time.perf_counter() - t
         print(f"export       {te:6.2f} s  ({sched.duration:.1f} s montage, "
-              f"{sched.duration * 30 / te:.0f} fps)")
+              f"{sched.duration * 30 / te:.0f} fps, {args.style} look)")
     if not args.keep:
         shutil.rmtree(d, ignore_errors=True)
 

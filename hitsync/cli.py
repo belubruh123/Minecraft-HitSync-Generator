@@ -1,9 +1,11 @@
-"""Headless pipeline: analyze -> align -> render, or launch the GUI.
+"""Headless pipeline: analyze -> align -> render, or launch the app.
 
-    python -m hitsync                       # GUI
-    python -m hitsync run VIDEO MUSIC -o out.mp4 [--intro 3 8] [--drop 12.5]
-    python -m hitsync check                 # dependency report
+    python -m hitsync [FILES...]            # the desktop app
+    python -m hitsync run VIDEO SONG [SONG2...] -o out.mp4 [--style hype]
+           [--drop 20.4] [--beats-per-hit 2] [--text "0:02-0:05=GG@top"]
+           [--effect "flashy=0:10-0:18"] [--fade-in black] [--fade-out white]
     python -m hitsync beats SONG [--click out.wav]   # check the beat detection
+    python -m hitsync check                 # dependency report
 """
 from __future__ import annotations
 
@@ -78,39 +80,89 @@ def _mmss(t: float) -> str:
     return f"{int(t // 60)}:{t % 60:05.2f}"
 
 
+def _secs(text: str) -> float:
+    """'1:05.5' or '65.5' -> seconds."""
+    parts = text.strip().split(":")
+    t = 0.0
+    for part in parts:
+        t = t * 60 + float(part)
+    return t
+
+
+def _span(text: str):
+    a, b = text.split("-", 1)
+    return _secs(a), _secs(b)
+
+
 def run(args) -> int:
     from .project import Project, default_output_path
+    from .styles import apply_style
 
-    p = Project(video_path=args.video, music_path=args.music,
-                output_path=args.output or default_output_path(args.video))
+    songs = list(args.music)
+    p = Project.new(video_path=args.video, music_path=songs[0],
+                    output_path=args.output or default_output_path(args.video))
+    for extra in songs[1:]:
+        p.add_song(extra)
+    if args.style:
+        apply_style(p, args.style)
     p.detect.sensitivity = args.sensitivity
     p.sync.jitter_tolerance_ms = args.tolerance
     p.sync.lock_mode = args.lock
-    p.sync.transition = args.transition
+    if args.transition:
+        p.sync.transition = args.transition
     p.sync.tempo_matching = not args.no_tempo
     p.render_params.interp = args.interp
     p.render_params.scale = args.scale
     p.render_params.hit_sound = args.hit_sound
     p.render_params.hit_sound_file = args.hit_sound_file or ""
     p.render_params.hit_volume = args.hit_volume
+    p.render_params.music_volume = args.music_volume
     p.render_params.encoder = args.encoder
     p.sync.min_combo_len = args.min_combo
     p.sync.fill_every_beat = not args.no_fill
     p.sync.bpm_override = args.bpm
+    p.sync.combo_spacing = args.beats_per_hit
+    if args.letterbox:
+        p.sync.letterbox_mode = args.letterbox
+    for which in ("in", "out"):
+        kind = getattr(args, f"fade_{which}")
+        if kind:
+            setattr(p.render_params, f"fade_{which}", kind)
     p.analyze(_progress)
     print()
+    if p.audio is None or p.video is None:
+        print("Could not analyse the video and the song.")
+        return 1
     if args.drop is not None:
-        b = p.markers.beats
-        p.sync.drop_time = min(b, key=lambda x: abs(x - args.drop)) if b else args.drop
+        p.set_drop(args.drop)
         p.auto_intro()                     # intro length depends on the drop
     if args.intro:
         p.sync.intro_start, p.sync.intro_end = args.intro
     if args.no_intro:
         p.sync.intro_enabled = False
     sched = p.recalculate()
-    print(f"Grid {p.grid_bpm:.2f} BPM, hits {len(p.markers.hits)}, "
-          f"real combos {len(p.real_combos())}, drop {p.sync.drop_time:.2f}s, "
-          f"intro {p.sync.intro_start:.2f}-{p.sync.intro_end:.2f}s")
+    # captions / effect ranges: times are from the start of the montage
+    for spec in args.text or []:
+        span, _, rest = spec.partition("=")
+        text, _, pos = rest.partition("@")
+        a, b = _span(span)
+        from .text_overlay import TextItem
+
+        p.texts.append(TextItem(text, sched.start + a, sched.start + b, pos or "bottom"))
+    for spec in args.effect or []:
+        kind, _, span = spec.partition("=")
+        a, b = _span(span)
+        p.add_effect(kind.strip(), sched.start + a, sched.start + b)
+    if args.text or args.effect:
+        sched = p.recalculate()
+    secs = p.audio.sections
+    print(f"Grid {p.grid_bpm:.2f} BPM (confidence {p.audio.grid.confidence:.0%}), "
+          f"hits {len(p.markers.hits)}, real combos {len(p.real_combos())}, "
+          f"music starts {p.sync.drop_time:.2f}s "
+          f"(candidates: {', '.join(f'{c.time:.2f}' for c in secs.top(3))}), "
+          f"style {p.render_params.style}")
+    if p.timeline() is not None:
+        print("Songs hand over at " + ", ".join(f"{t:.2f}s" for t in p.timeline().handovers))
     print(sched.summary())
     if args.save_project:
         p.save(args.save_project)
@@ -139,7 +191,7 @@ def main(argv=None) -> int:
     bt.add_argument("--click", help="write the song with a metronome click to this .wav")
     r = sub.add_parser("run", help="headless analyze + render")
     r.add_argument("video")
-    r.add_argument("music")
+    r.add_argument("music", nargs="+", help="one or more songs (played back to back)")
     r.add_argument("-o", "--output")
     r.add_argument("--intro", nargs=2, type=float, metavar=("START", "END"),
                    help="intro footage range in video seconds (default: auto)")
@@ -148,9 +200,21 @@ def main(argv=None) -> int:
     r.add_argument("--no-tempo", action="store_true", help="disable tempo matching")
     r.add_argument("--tolerance", type=float, default=80.0, help="jitter tolerance (ms)")
     r.add_argument("--lock", choices=["ramp", "trim"], default="ramp")
-    r.add_argument("--transition", choices=["cut", "flash"], default="cut")
+    r.add_argument("--style", choices=["clean", "montage", "hype", "cinematic"],
+                   help="one-click look (default: montage)")
+    r.add_argument("--transition", choices=["cut", "flash", "zoom", "whip", "dip"])
+    r.add_argument("--beats-per-hit", default="auto", choices=["auto", "0.5", "1", "2"])
+    r.add_argument("--letterbox", choices=["slowmo", "first combo", "combos", "off"])
+    r.add_argument("--fade-in", choices=["none", "black", "white"])
+    r.add_argument("--fade-out", choices=["none", "black", "white"])
+    r.add_argument("--text", action="append", metavar="START-END=TEXT[@top|center|bottom]",
+                   help='caption, times from the montage start, e.g. "0:02-0:05=GG EZ@top"')
+    r.add_argument("--effect", action="append", metavar="KIND=START-END",
+                   help='effect range, e.g. "flashy=0:10-0:18" (flashy, glow, rgb, strobe, '
+                        'bw, shake, zoom, blur)')
+    r.add_argument("--music-volume", type=float, default=1.0)
     r.add_argument("--sensitivity", type=float, default=0.5)
-    r.add_argument("--interp", choices=["nearest", "blend", "flow"], default="blend")
+    r.add_argument("--interp", choices=["nearest", "blend", "flow"], default="flow")
     r.add_argument("--scale", type=float, default=1.0)
     r.add_argument("--hit-sound", default="original",
                    choices=["original", "off", "classic", "strong", "crit", "knockback", "custom"],
@@ -163,7 +227,8 @@ def main(argv=None) -> int:
     r.add_argument("--bpm", type=float, default=0.0, help="force the static grid tempo")
     r.add_argument("--hit-sound-file", help="audio file for --hit-sound custom")
     r.add_argument("--hit-volume", type=float, default=0.8)
-    r.add_argument("--encoder", default="auto", choices=["auto", "x264", "nvenc", "amf", "qsv"],
+    r.add_argument("--encoder", default="auto",
+                   choices=["auto", "x264", "nvenc", "amf", "qsv", "videotoolbox"],
                    help="auto = GPU encoder when available, else x264")
     r.add_argument("--save-project")
     r.add_argument("--dry-run", action="store_true", help="analyze + align only")

@@ -54,6 +54,13 @@ class GridTests(unittest.TestCase):
         # bar lines on beat 1
         self.assertLess(abs(((bars[0] - info["first_beat"]) / (4 * 60 / 96) + 0.5) % 1 - 0.5), 0.01)
 
+    def test_full_length_song(self):
+        # a 3-minute song: the windowed tempo search is ~0.2 BPM off and has
+        # side lobes near 192; the whole-song refinement must still land on 96
+        ma, beats, bars, secs, info = analyse(sm.shape_like, duration=180.0)
+        self.assertOnBeats(ma, beats, info)
+        self.assertFalse(ma.grid.drift)
+
     def test_edm_offbeat_hats_and_build(self):
         ma, beats, bars, secs, info = analyse(sm.edm_like)
         self.assertOnBeats(ma, beats, info)

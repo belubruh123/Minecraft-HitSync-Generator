@@ -308,19 +308,30 @@ def estimate_grid(onset_t: np.ndarray, onset_w: np.ndarray, beat_t: np.ndarray,
         s_drum, _ = _fold_scores(beat_t, beat_w, 60.0 / coarse, width, 12.0)
         score = 0.5 * s_all + s_drum
         peaks = _local_maxima(score, 15)
-        # 2. fine: whole-song coherence around each peak
+        # 2. fine: whole-song coherence around each peak (the windowed score
+        #    can be ~0.2 BPM off, so search +-1% then refine)
         fine = []
         for i in peaks[:6]:
-            b0 = coarse[i]
-            grid = np.arange(b0 - 0.12, b0 + 0.12, 0.004)
-            sf, _ = _fold_scores(beat_t, beat_w, 60.0 / grid, width, None)
-            top = np.nonzero(sf >= sf.max() - 1e-3)[0]      # middle of a flat top
-            j = int(top[len(top) // 2])
-            fine.append((float(grid[j]), float(score[i]), float(sf[j])))
+            b = _fine_tempo(coarse[i], beat_t, beat_w, width)
+            sf, _ = _fold_scores(beat_t, beat_w, [60.0 / b], width, None)
+            fine.append((b, float(score[i]), float(sf[0])))
+        # side lobes of the windowed search fall apart over the whole song:
+        # of tempos within 3% keep the most coherent one
+        fine.sort(key=lambda f: -f[2])
+        kept = []
+        for f in fine:
+            if all(abs(f[0] / k[0] - 1) > 0.03 for k in kept):
+                kept.append(f)
         # 3. metrical level: fold strength x tempo prior x "not a subdivision"
         scored = [(b, _prior(b) * _level_score(b, beat_t, beat_w, accent_w))
-                  for b, _, _ in fine]
-        chosen = max(scored, key=lambda c: c[1])[0]
+                  for b, _, _ in kept]
+        best = max(scored, key=lambda c: c[1])
+        # a very fast "beat" with a strong half tempo is felt at the half
+        if best[0] > 176:
+            half = [c for c in scored if abs(c[0] * 2 / best[0] - 1) < 0.01]
+            if half and half[0][1] >= 0.4 * best[1]:
+                best = half[0]
+        chosen = best[0]
         cands = []
         for b, sc in sorted(scored, key=lambda c: -c[1]):
             if all(abs(b / c[0] - 1) > 0.015 for c in cands):     # distinct tempos only
@@ -339,24 +350,39 @@ def estimate_grid(onset_t: np.ndarray, onset_w: np.ndarray, beat_t: np.ndarray,
     return Grid(60.0 / period, phase, 0, conf, drift, cands)
 
 
+def _fine_tempo(b0, times, weights, width) -> float:
+    """Whole-song coherence maximum near b0: +-1% at 0.02 BPM, then +-0.04
+    at 0.002 BPM; the middle of a flat top."""
+    b = b0
+    for span, step in ((0.01 * b0, 0.02), (0.04, 0.002)):
+        grid = np.arange(b - span, b + span + step / 2, step)
+        sf, _ = _fold_scores(times, weights, 60.0 / grid, width, None)
+        top = np.nonzero(sf >= sf.max() - 1e-3)[0]
+        b = float(grid[top[len(top) // 2]])
+    return b
+
+
 def _level_score(bpm, beat_t, beat_w, accent_w) -> float:
     """Fold strength of a tempo, penalised when it is really a subdivision.
 
-    At the true beat level consecutive beats carry similar accents (kick,
-    snare, kick, snare). At the 8th-note level every other grid point is a
-    weaker off-beat: fold at two periods and compare the two halves, using
-    squared kick+snare strength so loud accents dominate.
+    At the true beat level nearly every beat carries a strong accent (a kick
+    or a snare). At the 8th-note level every other grid point is an
+    off-beat with only hats: compare how many grid points of each half
+    (even / odd) have a strong accent.
     """
     P = 60.0 / bpm
     sc, _ = _fold_scores(beat_t, beat_w, [P], 0.03, 12.0)
     _, ph0 = _fold_scores(beat_t, accent_w, [P], 0.03, None)
-    ph = ((beat_t - ph0[0]) / P) % 2.0
-    on_grid = np.minimum(ph % 1.0, 1 - ph % 1.0) * P < 0.035
-    first = (ph < 0.5) | (ph > 1.5)
-    a = accent_w[on_grid & first].sum()
-    b = accent_w[on_grid & ~first].sum()
-    ratio = max(a, b) / max(min(a, b), 1e-9)
-    alt = 1.0 / (1.0 + max(0.0, ratio - 1.2))
+    strong = accent_w >= 0.25 * np.percentile(accent_w, 90)
+    k = np.round((beat_t - ph0[0]) / P).astype(int)
+    on = np.abs(beat_t - (ph0[0] + k * P)) < 0.035
+    hit = np.unique(k[on & strong])
+    if len(hit) < 8:
+        return float(max(sc[0], 1e-3))
+    span = np.arange(hit.min(), hit.max() + 1)
+    cov = [np.isin(span[span % 2 == par], hit).mean() for par in (0, 1)]
+    ratio = max(cov) / max(min(cov), 1e-3)
+    alt = 1.0 / (1.0 + max(0.0, ratio - 1.3))
     return float(max(sc[0], 1e-3) * alt)
 
 
