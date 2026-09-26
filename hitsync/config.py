@@ -122,7 +122,7 @@ class RenderParams:
     scale: float = 1.0              # output resolution scale
     interp: str = "flow"            # slow-mo frame synthesis: nearest|blend|flow
     crf: int = 18                   # quality (lower = better); hardware encoders map it
-    preset: str = "medium"          # x264 speed preset
+    preset: str = "faster"          # x264 speed preset (2x "medium", same size at crf 18)
     # "auto" = GPU encoder (NVIDIA/AMD/Intel) when one works, else x264 on the CPU
     encoder: str = "auto"           # auto | x264 | nvenc | amf | qsv
     audio_fade_out: float = 1.5

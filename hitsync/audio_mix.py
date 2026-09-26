@@ -159,8 +159,15 @@ def _game_audio(video_path: str, mtime: float):
 
 @lru_cache(maxsize=2)
 def _sound_bursts(video_path: str, mtime: float):
-    """Attack times (s, audio timeline) and strengths of every distinct sound."""
+    """Attack times (s, audio timeline) and strengths of every distinct sound.
+
+    Onsets are found on the spectral flux, then moved onto the audible
+    attack in the waveform (the flux of a 46 ms window reacts ~20-30 ms
+    early), so a cut there starts right at the hit sound.
+    """
     import librosa
+
+    from .music_grid import refine_attacks
 
     game, _ = _game_audio(video_path, mtime)
     if game is None or not len(game):
@@ -171,9 +178,8 @@ def _sound_bursts(video_path: str, mtime: float):
     frames = librosa.onset.onset_detect(onset_envelope=env, sr=SR, hop_length=hop,
                                         units="frames", backtrack=False)
     strength = env[frames] if len(frames) else np.zeros(0)
-    # backtrack to the energy minimum right before each attack: the cut point
-    frames = librosa.onset.onset_backtrack(frames, env) if len(frames) else frames
-    return librosa.frames_to_time(frames, sr=SR, hop_length=hop), strength
+    times = librosa.frames_to_time(frames, sr=SR, hop_length=hop)
+    return refine_attacks(y, SR, times, search=(0.05, 0.04)), strength
 
 
 def _hit_onsets(video_path: str, src_times, sr: int = SR):

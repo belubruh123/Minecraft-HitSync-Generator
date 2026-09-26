@@ -319,7 +319,10 @@ def compose_frame(source: FrameSource, schedule: Schedule, t: float, rparams: Re
     """Build one output frame at output time ``t`` (also used for GUI preview)."""
     src_t = schedule.src_time(t)
     speed = schedule.speed_at(t)
-    mode = rparams.interp if speed < 0.9 else "nearest"
+    # optical flow only pays off in real slow motion; a mild slow-down (a
+    # combo stretched onto the beat) blends neighbouring frames instead
+    mode = rparams.interp if speed < 0.65 else "blend" if speed < 0.9 and \
+        rparams.interp != "nearest" else "nearest"
     frame = source.frame_at(src_t, mode)
     resized = bool(size) and (frame.shape[1], frame.shape[0]) != size
     if resized:

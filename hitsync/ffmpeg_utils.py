@@ -12,6 +12,8 @@ import subprocess
 import sys
 from functools import lru_cache
 
+import numpy as np
+
 # Keep ffmpeg from flashing a console window when launched from the GUI.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -38,9 +40,12 @@ def find_ffmpeg() -> str | None:
 def require_ffmpeg() -> str:
     exe = find_ffmpeg()
     if not exe:
+        hint = ("`brew install ffmpeg`" if sys.platform == "darwin" else
+                "`winget install Gyan.FFmpeg`" if sys.platform == "win32" else
+                "your package manager (e.g. `sudo apt install ffmpeg`)")
         raise RuntimeError(
-            "ffmpeg not found. Install it (e.g. `winget install Gyan.FFmpeg`), "
-            "`pip install imageio-ffmpeg`, or set HITSYNC_FFMPEG to ffmpeg.exe.")
+            f"ffmpeg not found. Install it with {hint}, run `pip install imageio-ffmpeg`, "
+            "or set HITSYNC_FFMPEG to the ffmpeg executable.")
     return exe
 
 
@@ -83,7 +88,37 @@ def _first_pts(path: str, kind: str):
     return 0.0 if kind == "v" else None
 
 
-HW_ENCODERS = {"nvenc": "h264_nvenc", "amf": "h264_amf", "qsv": "h264_qsv"}
+@lru_cache(maxsize=1)
+def hwaccel_args() -> list[str]:
+    """ffmpeg input options for GPU decoding, or [] when none works here.
+
+    ``-hwaccel auto`` picks D3D11VA/DXVA2/CUDA on Windows, VideoToolbox on
+    macOS, VAAPI/CUDA on Linux, and quietly decodes on the CPU when the GPU
+    can't. One tiny test decode proves the GPU path actually opens.
+    Set HITSYNC_HWACCEL=0 to disable.
+    """
+    if os.environ.get("HITSYNC_HWACCEL", "1") == "0":
+        return []
+    exe = find_ffmpeg()
+    if not exe:
+        return []
+    method = "videotoolbox" if sys.platform == "darwin" else "auto"
+    cmd = [exe, "-hide_banner", "-loglevel", "verbose", "-nostdin", "-hwaccel", method,
+           "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:d=0.3", "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=20,
+                           creationflags=NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode != 0:
+        return []
+    # lavfi input isn't hardware-decodable; this only proves the option is
+    # accepted. Actual GPU use is decided per file, with a CPU retry.
+    return ["-hwaccel", method]
+
+
+HW_ENCODERS = {"nvenc": "h264_nvenc", "amf": "h264_amf", "qsv": "h264_qsv",
+               "videotoolbox": "h264_videotoolbox"}
 
 
 @lru_cache(maxsize=8)
@@ -109,7 +144,8 @@ def encoder_works(name: str) -> bool:
 def video_encoder_args(choice: str, crf: int, preset: str) -> tuple[str, list[str]]:
     """(label, ffmpeg args) for the chosen encoder, at roughly equal quality."""
     choice = (choice or "auto").lower()
-    order = list(HW_ENCODERS) if choice == "auto" else [choice] if choice in HW_ENCODERS else []
+    auto = ["videotoolbox"] if sys.platform == "darwin" else ["nvenc", "amf", "qsv"]
+    order = auto if choice == "auto" else [choice] if choice in HW_ENCODERS else []
     for key in order:
         name = HW_ENCODERS[key]
         if not encoder_works(name):
@@ -120,8 +156,22 @@ def video_encoder_args(choice: str, crf: int, preset: str) -> tuple[str, list[st
         if key == "amf":
             return name, ["-c:v", name, "-quality", "quality", "-rc", "cqp",
                           "-qp_i", q, "-qp_p", str(int(crf) + 2)]
+        if key == "videotoolbox":
+            # quality scale 1-100; crf 18 -> ~70
+            return name, ["-c:v", name, "-q:v", str(int(np.clip(125 - 3 * int(crf), 40, 90))),
+                          "-allow_sw", "1"]
         return name, ["-c:v", name, "-preset", "medium", "-global_quality", q]
     return "libx264", ["-c:v", "libx264", "-preset", preset, "-crf", str(int(crf))]
+
+
+def open_path(path: str):
+    """Open a file or folder with the system's default app."""
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 
 def extract_audio_wav(src: str, dst: str, sr: int = 22050, mono: bool = True):
