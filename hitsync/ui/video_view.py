@@ -181,8 +181,9 @@ class FullscreenPlayer(QWidget):
 
 
 class SongView(QWidget):
-    """A song's loudness with beats, bar lines, start candidates and the
-    playhead. Click to jump; the candidates are drawn as flags."""
+    """A song's loudness with beats, bar lines, start candidates, where it
+    ends / switches to the next song, and the playhead. Click to jump; the
+    candidates are drawn as flags."""
 
     seek = Signal(float)
 
@@ -199,12 +200,17 @@ class SongView(QWidget):
         self.candidates: list = []      # (time, label)
         self.taps: list = []
         self.title = ""
+        self.end = None                 # where it switches to the next song / ends
+        self.end_label = ""
+        self.end_auto = True
 
-    def set_song(self, curve_t, level, beats, downbeats, duration, start, candidates, title):
+    def set_song(self, curve_t, level, beats, downbeats, duration, start, candidates, title,
+                 end=None, end_label="", end_auto=True):
         self.curve_t, self.level = np.asarray(curve_t), np.asarray(level)
         self.beats, self.downbeats = np.asarray(beats), np.asarray(downbeats)
         self.duration = max(1e-3, duration)
         self.start, self.candidates, self.title = start, candidates, title
+        self.end, self.end_label, self.end_auto = end, end_label, end_auto
         self.update()
 
     def x_of(self, t):
@@ -266,6 +272,19 @@ class SongView(QWidget):
             f.setBold(True)
             p.setFont(f)
             p.drawText(QPointF(x + 4, 28), "MUSIC STARTS")
+        if self.end is not None and self.end < self.duration - 1e-3:
+            x = self.x_of(self.end)
+            p.fillRect(QRectF(x, 18, self.x_of(self.duration) - x, base - 18),
+                       QColor(0, 0, 0, 110))                # not played
+            color = QColor(theme.ACCENT)
+            p.setPen(QPen(color, 2, Qt.DashLine if self.end_auto else Qt.SolidLine))
+            p.drawLine(QPointF(x, 18), QPointF(x, base))
+            p.setPen(color)
+            f.setBold(True)
+            p.setFont(f)
+            text = f"✂ {self.end_label}" + (" (auto)" if self.end_auto else "")
+            w = p.fontMetrics().horizontalAdvance(text)
+            p.drawText(QPointF(x - w - 4 if x + w + 8 > self.width() else x + 4, 28), text)
         for t in self.taps[-12:]:
             x = self.x_of(t)
             p.setPen(QPen(QColor(theme.WARN), 2))

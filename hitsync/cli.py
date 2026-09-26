@@ -2,7 +2,7 @@
 
     python -m hitsync [FILES...]            # the desktop app
     python -m hitsync run VIDEO SONG [SONG2...] -o out.mp4 [--style hype]
-           [--drop 20.4] [--beats-per-hit 2] [--text "0:02-0:05=GG@top"]
+           [--drop 20.4] [--beats-per-hit 2] [--text "0:02-0:05=GG@top"] [--focus 1,3]
            [--effect "flashy=0:10-0:18"] [--fade-in black] [--fade-out white]
     python -m hitsync beats SONG [--click out.wav]   # check the beat detection
     python -m hitsync check                 # dependency report
@@ -136,6 +136,13 @@ def run(args) -> int:
     if args.drop is not None:
         p.set_drop(args.drop)
         p.auto_intro()                     # intro length depends on the drop
+    if args.focus:
+        # focus bars on these combos (1-based, in time order)
+        choices = [c for c, _ in p.plan_entries()]
+        for n in args.focus:
+            if 1 <= n <= len(choices):
+                choices[n - 1].focus = True
+        p.set_plan(choices)
     if args.intro:
         p.sync.intro_start, p.sync.intro_end = args.intro
     if args.no_intro:
@@ -205,6 +212,8 @@ def main(argv=None) -> int:
     r.add_argument("--transition", choices=["cut", "flash", "zoom", "whip", "dip"])
     r.add_argument("--beats-per-hit", default="auto", choices=["auto", "0.5", "1", "2"])
     r.add_argument("--letterbox", choices=["slowmo", "first combo", "combos", "off"])
+    r.add_argument("--focus", type=lambda v: [int(x) for x in v.split(",") if x.strip()],
+                   metavar="N[,N...]", help="black focus bars on these combos, e.g. 1,3")
     r.add_argument("--fade-in", choices=["none", "black", "white"])
     r.add_argument("--fade-out", choices=["none", "black", "white"])
     r.add_argument("--text", action="append", metavar="START-END=TEXT[@top|center|bottom]",

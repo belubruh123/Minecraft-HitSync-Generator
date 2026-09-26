@@ -165,17 +165,21 @@ class Markers:
 
 @dataclass
 class ComboChoice:
-    """One entry of the combo plan: which combo, whether it's used, and
-    whether it gets a slow-mo lead-in. ``key`` is the combo's first hit time,
-    which survives re-grouping and re-detection."""
+    """One entry of the combo plan: which combo, whether it's used, whether
+    it gets a slow-mo lead-in and whether it gets focus bars (black bars top
+    and bottom). ``key`` is the combo's first hit time, which survives
+    re-grouping and re-detection."""
 
     key: float
     enabled: bool = True
     lead_in: bool = False
+    focus: bool = False
 
     def to_dict(self):
-        return {"key": self.key, "enabled": self.enabled, "lead_in": self.lead_in}
+        return {"key": self.key, "enabled": self.enabled, "lead_in": self.lead_in,
+                "focus": self.focus}
 
     @classmethod
     def from_dict(cls, d):
-        return cls(float(d["key"]), bool(d.get("enabled", True)), bool(d.get("lead_in", False)))
+        return cls(float(d["key"]), bool(d.get("enabled", True)), bool(d.get("lead_in", False)),
+                   bool(d.get("focus", False)))

@@ -99,7 +99,11 @@ class AdvancedDialog(QDialog):
     def __init__(self, project_getter, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Advanced settings")
-        self.resize(820, 640)
+        screen = (parent.screen() if parent is not None else None) or self.screen()
+        avail = screen.availableGeometry() if screen is not None else None
+        # fits a small screen; every tab scrolls
+        self.resize(min(820, avail.width() - 40) if avail else 820,
+                    min(640, avail.height() - 60) if avail else 640)
         self.P = project_getter
         lay = QVBoxLayout(self)
         lay.addWidget(label("For fine-tuning. Everything here has good automatic defaults.",

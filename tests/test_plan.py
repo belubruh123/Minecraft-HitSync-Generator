@@ -124,6 +124,39 @@ class PlanTests(unittest.TestCase):
         s3 = build_schedule(m, params(letterbox_mode="off"), 100, 200, plan=[(c1, False)])
         self.assertEqual(s3.letterbox_amount(DROP - 1.0), 0.0)
 
+    def test_focus_bars_on_a_chosen_combo(self):
+        m = markers()
+        c1, c2, c3 = m.combos()
+        for mode in ("slowmo", "off"):
+            s = build_schedule(m, params(letterbox_mode=mode), 100, 200,
+                               plan=[(c1, False, False), (c2, False, True), (c3, False, False)])
+            spans = s.combo_spans
+            mid = [(a + b) / 2 for a, b, _ in spans]
+            self.assertEqual(s.letterbox_amount(mid[0]), 0.0, mode)
+            self.assertEqual(s.letterbox_amount(mid[1]), 1.0, mode)    # the focused combo
+            self.assertEqual(s.letterbox_amount(mid[2]), 0.0, mode)
+            # fully in by its first hit, and gone before the next combo
+            self.assertEqual(s.letterbox_amount(s.placements[c2[0]].out_t), 1.0, mode)
+            self.assertEqual(s.letterbox_amount(spans[2][0]), 0.0, mode)
+        # "off" keeps the intro full frame; only the focused combo gets bars
+        self.assertEqual(s.letterbox_amount(DROP - 1.0), 0.0)
+        # old 2-tuples still work (no focus)
+        s2 = build_schedule(m, params(letterbox_mode="off"), 100, 200, plan=[(c1, False)])
+        self.assertEqual(s2.letterbox, [])
+
+    def test_focus_after_slowmo_keeps_the_bars_on(self):
+        m = markers()
+        c1, c2, _ = m.combos()
+        # the first combo, after the slow-mo intro, and a lead-in combo
+        s = build_schedule(m, params(), 100, 200, plan=[(c1, False, True), (c2, True, True)])
+        a1, b1, _ = s.combo_spans[0]
+        l0, l1 = s.leadins[0]
+        for t in np.linspace(DROP - 1.0, (a1 + b1) / 2, 40):
+            self.assertEqual(s.letterbox_amount(t), 1.0, t)       # no dip on the drop
+        for t in np.linspace((l0 + l1) / 2, l1 + 1.0, 40):
+            self.assertEqual(s.letterbox_amount(t), 1.0, t)       # nor after the lead-in
+        self.assertGreater(s.flash_amount(DROP), 0.75)            # the flash still marks it
+
     def test_velocity_edit_keeps_hits_on_the_beat(self):
         m = markers()
         c1 = m.combos()[0]
@@ -163,7 +196,7 @@ class ProjectPlanTests(unittest.TestCase):
     def test_default_plan_is_every_real_combo_in_time_order(self):
         p = self.project()
         plan = p.engine_plan()
-        self.assertEqual([g for g, _ in plan], p.real_combos())
+        self.assertEqual([e[0] for e in plan], p.real_combos())
 
     def test_plan_survives_redetection(self):
         p = self.project()
@@ -207,7 +240,7 @@ class ProjectPlanTests(unittest.TestCase):
         p.auto_pick()
         on = [c for c in p.combo_plan if c.enabled]
         self.assertIn(best, [c.key for c in on])
-        self.assertLessEqual(sum(len(g) for g, _ in p.engine_plan()), 25)
+        self.assertLessEqual(sum(len(e[0]) for e in p.engine_plan()), 25)
         self.assertEqual([c.key for c in on], sorted(c.key for c in on))
 
     def test_per_hit_effects_survive_redetection(self):
@@ -228,6 +261,7 @@ class ProjectPlanTests(unittest.TestCase):
         p = self.project()
         entries = p.plan_entries()
         entries[1][0].lead_in = True
+        entries[1][0].focus = True
         p.set_plan([c for c, _ in entries][::-1])
         path = os.path.join(tempfile.mkdtemp(), "p.json")
         p.save(path)
@@ -235,6 +269,9 @@ class ProjectPlanTests(unittest.TestCase):
         self.assertTrue(q.plan_custom)
         self.assertEqual([c.key for c in q.combo_plan], [c.key for c in p.combo_plan])
         self.assertTrue(q.combo_plan[1].lead_in)
+        self.assertTrue(q.combo_plan[1].focus)
+        self.assertFalse(q.combo_plan[0].focus)
+        self.assertEqual(q.engine_plan()[1][1:], (True, True))
         self.assertIsInstance(q.combo_plan[0], ComboChoice)
 
 

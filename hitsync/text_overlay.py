@@ -1,9 +1,9 @@
-"""YouTuber-style captions: bold text with a thick outline and a shadow,
-at the top, centre or bottom of the screen, animated in and out.
+"""YouTuber-style captions: bold text with a thick outline, a glow or a
+shadow, at the top, centre or bottom of the screen, animated in and out.
 
-Each caption is rendered once (Pillow, with its stroke) into an RGBA sprite
-and cached; per frame it is only scaled/moved/faded and alpha-blended onto
-the frame inside its own box, so captions cost next to nothing.
+Each caption is rendered once (Pillow, with its stroke and glow) into an RGBA
+sprite and cached; per frame it is only scaled/moved/faded and alpha-blended
+onto the frame inside its own box, so captions cost next to nothing.
 """
 from __future__ import annotations
 
@@ -12,20 +12,40 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+from typing import Optional
 
 import cv2
 import numpy as np
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
 
-# fill, outline, shadow (RGBA), outline width (fraction of font size), font
+
+@dataclass(frozen=True)
+class CaptionStyle:
+    fill: tuple                      # RGBA
+    outline: tuple                   # RGBA
+    shadow: tuple                    # RGBA (alpha 0 = none)
+    outline_w: float                 # fraction of the font size
+    font: str
+    glow: Optional[tuple] = None     # RGB of the glow around the outline
+    glow_radius: float = 0.18        # blur radius, fraction of the font size
+    glow_strength: float = 2.0       # >1 = more vivid (the glow is stacked)
+
+
 STYLES = {
-    "youtuber": ((255, 255, 255, 255), (0, 0, 0, 255), (0, 0, 0, 170), 0.11, "Anton"),
-    "yellow": ((255, 226, 0, 255), (0, 0, 0, 255), (0, 0, 0, 170), 0.11, "Anton"),
-    "red": ((255, 59, 59, 255), (255, 255, 255, 255), (0, 0, 0, 160), 0.09, "Anton"),
-    "impact": ((255, 255, 255, 255), (0, 0, 0, 255), (0, 0, 0, 0), 0.08, "Montserrat"),
-    "minimal": ((255, 255, 255, 255), (0, 0, 0, 200), (0, 0, 0, 120), 0.04, "Montserrat"),
+    # white letters, purple outline, vivid purple glow, rounded font
+    "glow": CaptionStyle((255, 255, 255, 255), (138, 43, 226, 255), (0, 0, 0, 0), 0.10,
+                         "Fredoka", glow=(180, 90, 255)),
+    "youtuber": CaptionStyle((255, 255, 255, 255), (0, 0, 0, 255), (0, 0, 0, 170), 0.11, "Anton"),
+    "yellow": CaptionStyle((255, 226, 0, 255), (0, 0, 0, 255), (0, 0, 0, 170), 0.11, "Anton"),
+    "red": CaptionStyle((255, 59, 59, 255), (255, 255, 255, 255), (0, 0, 0, 160), 0.09, "Anton"),
+    "impact": CaptionStyle((255, 255, 255, 255), (0, 0, 0, 255), (0, 0, 0, 0), 0.08, "Montserrat"),
+    "minimal": CaptionStyle((255, 255, 255, 255), (0, 0, 0, 200), (0, 0, 0, 120), 0.04,
+                            "Montserrat"),
 }
+LABELS = {"glow": "Glow (purple)", "youtuber": "YouTuber", "yellow": "Yellow", "red": "Red",
+          "impact": "Impact", "minimal": "Minimal"}
+DEFAULT_STYLE = "glow"
 ANIMATIONS = ["pop", "slide", "fade", "typewriter", "none"]
 POSITIONS = ["top", "center", "bottom"]
 
@@ -36,7 +56,7 @@ class TextItem:
     start: float                 # music time
     end: float
     position: str = "bottom"     # top | center | bottom
-    style: str = "youtuber"
+    style: str = DEFAULT_STYLE
     animation: str = "pop"
     size: float = 1.0            # 1 = 7.5% of the frame height
 
@@ -46,7 +66,7 @@ class TextItem:
     @classmethod
     def from_dict(cls, d):
         return cls(str(d.get("text", "")), float(d["start"]), float(d["end"]),
-                   str(d.get("position", "bottom")), str(d.get("style", "youtuber")),
+                   str(d.get("position", "bottom")), str(d.get("style", DEFAULT_STYLE)),
                    str(d.get("animation", "pop")), float(d.get("size", 1.0)))
 
 
@@ -67,7 +87,8 @@ def _system_fonts(name: str) -> list[str]:
 @lru_cache(maxsize=16)
 def font_path(name: str = "Anton") -> str | None:
     """The bundled font, else a bold system font, else None (Pillow default)."""
-    bundled = {"Anton": "Anton-Regular.ttf", "Montserrat": "Montserrat-Black.ttf"}
+    bundled = {"Anton": "Anton-Regular.ttf", "Montserrat": "Montserrat-Black.ttf",
+               "Fredoka": "Fredoka-Bold.ttf"}
     cands = []
     if os.path.isfile(name):                         # a custom font file
         cands.append(name)
@@ -105,34 +126,63 @@ def _wrap(text: str, font, max_w: int) -> str:
     return "\n".join(lines)
 
 
+def sprite_pad(style: str, px: int) -> int:
+    """Empty margin around the text inside its sprite (room for the outline,
+    shadow and the widest glow blur, about 3 sigma, so it's never cut off)."""
+    st = STYLES.get(style, STYLES[DEFAULT_STYLE])
+    stroke_w = max(1, int(round(px * st.outline_w)))
+    pad = stroke_w + int(px * 0.12)
+    if st.glow:
+        glow_r = max(1.0, px * st.glow_radius)
+        pad += int(np.ceil(glow_r * 2 * 3)) + int(round(px * 0.06))
+    return pad
+
+
 @lru_cache(maxsize=128)
 def render_sprite(text: str, style: str, px: int, max_w: int) -> np.ndarray:
     """(h, w, 4) float32 premultiplied-alpha RGBA sprite of the caption, BGR order."""
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-    fill, stroke, shadow, sw, face = STYLES.get(style, STYLES["youtuber"])
-    font = _font(face, px)
+    st = STYLES.get(style, STYLES[DEFAULT_STYLE])
+    font = _font(st.font, px)
     text = _wrap(text, font, max_w)
-    stroke_w = max(1, int(round(px * sw)))
+    stroke_w = max(1, int(round(px * st.outline_w)))
+    spacing = int(px * 0.12)
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     box = probe.multiline_textbbox((0, 0), text, font=font, stroke_width=stroke_w, align="center",
-                                   spacing=int(px * 0.12))
+                                   spacing=spacing)
     box = (int(np.floor(box[0])), int(np.floor(box[1])), int(np.ceil(box[2])),
            int(np.ceil(box[3])))                     # (newer Pillow returns floats)
-    pad = stroke_w + int(px * 0.12)
+    glow_r = max(1.0, px * st.glow_radius) if st.glow else 0.0
+    glow_w = stroke_w + int(round(px * 0.06)) if st.glow else 0
+    pad = sprite_pad(style, px)
     w, h = box[2] - box[0] + 2 * pad, box[3] - box[1] + 2 * pad
     origin = (pad - box[0], pad - box[1])
     img = Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
-    if shadow[3] > 0:
-        sh = Image.new("RGBA", img.size, (0, 0, 0, 0))
+
+    if st.glow:
+        # a soft halo in the glow colour: a tight bright core plus a wide
+        # soft one, so it reads as vivid neon (only the alpha is blurred, so
+        # the colour stays pure out to the edge)
+        mask = Image.new("L", img.size, 0)
+        ImageDraw.Draw(mask).multiline_text(origin, text, font=font, fill=255,
+                                            stroke_width=glow_w, stroke_fill=255,
+                                            align="center", spacing=spacing)
+        k = st.glow_strength
+        core = mask.filter(ImageFilter.GaussianBlur(glow_r)).point(lambda v: min(255, int(v * k)))
+        wide = mask.filter(ImageFilter.GaussianBlur(glow_r * 2)).point(lambda v: int(v * 0.7))
+        halo = Image.new("RGBA", img.size, tuple(st.glow) + (0,))
+        halo.putalpha(ImageChops.lighter(core, wide))
+        img = Image.alpha_composite(img, halo)
+    if st.shadow[3] > 0:
         off = max(1, int(px * 0.06))
+        sh = Image.new("RGBA", img.size, (0, 0, 0, 0))
         ImageDraw.Draw(sh).multiline_text((origin[0] + off, origin[1] + off), text, font=font,
-                                          fill=shadow, stroke_width=stroke_w, stroke_fill=shadow,
-                                          align="center", spacing=int(px * 0.12))
+                                          fill=st.shadow, stroke_width=stroke_w,
+                                          stroke_fill=st.shadow, align="center", spacing=spacing)
         img = Image.alpha_composite(img, sh.filter(ImageFilter.GaussianBlur(px * 0.05)))
-    ImageDraw.Draw(img).multiline_text(origin, text, font=font, fill=fill, stroke_width=stroke_w,
-                                       stroke_fill=stroke, align="center",
-                                       spacing=int(px * 0.12))
+    ImageDraw.Draw(img).multiline_text(origin, text, font=font, fill=st.fill, stroke_width=stroke_w,
+                                       stroke_fill=st.outline, align="center", spacing=spacing)
     a = np.asarray(img, np.float32) / 255.0
     rgb = a[..., :3][..., ::-1] * a[..., 3:4]           # BGR, premultiplied
     return np.concatenate([rgb, a[..., 3:4]], axis=2)
@@ -184,6 +234,8 @@ def draw_caption(frame: np.ndarray, item: TextItem, t: float, top_bar: float = 0
     px = max(8, int(round(0.075 * H * item.size)))
     sprite = render_sprite(item.text[:chars] if chars < len(item.text) else item.text,
                            item.style, px, int(W * 0.9))
+    # the text box (without the glow/outline margin) sits `margin` from the edge
+    text_h = max(1, sprite.shape[0] - 2 * sprite_pad(item.style, px))
     if abs(scale - 1.0) > 1e-3:
         sh, sw = sprite.shape[:2]
         sprite = cv2.resize(sprite, (max(1, int(sw * scale)), max(1, int(sh * scale))),
@@ -191,11 +243,11 @@ def draw_caption(frame: np.ndarray, item: TextItem, t: float, top_bar: float = 0
     sh, sw = sprite.shape[:2]
     margin = int(0.06 * H)
     if item.position == "top":
-        cy = margin + px * 0.6 + top_bar * 0.0
+        cy = margin + text_h / 2
     elif item.position == "center":
         cy = H / 2
     else:
-        cy = H - margin - px * 0.6
+        cy = H - margin - text_h / 2
     cy += dy * px
     x0 = int(round(W / 2 - sw / 2))
     y0 = int(round(cy - sh / 2))

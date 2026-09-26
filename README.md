@@ -78,20 +78,24 @@ Every real combo (10+ steady hits) is shown with a thumbnail and ★ rating.
 - **★ Auto-pick best** uses the best combos that fit the song.
 - **Slow-mo lead-in**: the footage before that combo plays in slow motion
   (with letterbox bars and a flash), and the combo still starts on the beat.
-- **✦ Hit effects**: choose which hits get the zoom/shake/flash/RGB effects.
+- **🎬 Focus bars**: black bars at the top and bottom while that combo plays,
+  a cinematic focus on it. After a slow-mo part the bars simply stay on.
+- **✦ Effects**: choose which hits get the zoom/shake/flash/RGB effects.
   Quick picks: All, None, Every 2nd, First & last. On the timeline, **E** toggles
   a selected hit.
 
 ### Text panel
 
-**＋ Add text at playhead** adds a YouTuber-style caption: bold, thick outline,
-shadow. For each caption you can:
+**＋ Add text at playhead** adds a caption. The default style is **Glow**:
+white rounded letters (Fredoka) with a purple outline and a vivid purple glow.
+For each caption you can:
 
 - type the text
-- choose **Top / Center / Bottom**, a style (YouTuber, Yellow, Red, Impact,
-  Minimal) and an animation (Pop, Slide, Fade, Typewriter)
-- set **Start here / End here** from the playhead, or drag the yellow bar's
-  edges on the timeline (they snap to beats)
+- choose **Top / Center / Bottom**, a style (Glow, YouTuber, Yellow, Red,
+  Impact, Minimal) and an animation (Pop, Slide, Fade, Typewriter)
+- set **⇤ Start / End ⇥** at the playhead, or drag the yellow bar's edges on
+  the timeline (they snap to beats). Times are shown on the montage clock,
+  like the player.
 
 Add as many captions as you like, one after another.
 
@@ -106,23 +110,39 @@ Add as many captions as you like, one after another.
   each impact, fast in between).
 - **Look**: filter (Vibrant, Cinematic, Warm, Cool, Punchy, B&W, Vintage,
   Night) and its strength, motion blur, vignette, bar pulse.
+- **Focus bars**: the automatic black bars (slow-mo parts, intro + first
+  combo, every combo, or off). Bars on single combos are ticked in Combos.
 - **Between combos**: cut, flash, zoom, whip or dip.
 - **Start and end**: fade from black or flash in; end with a cut, fade to
   black or fade to white, each with its own length. The montage keeps playing
   past the last hit so the fade never covers a hit.
 
-### More songs
+### Music panel (more songs)
 
-Drop more songs and they play back to back. Each song plays until its last
-loud bar. The next one fades in over about a bar, playing its own lead-up, and
-reaches *its* start point exactly on that bar: no gap, and the beat grid
-continues. Pick a song in the Song tab to set its start or fix its beat.
+Drop more songs, or press **＋ Add song** in the **Music** tab. They play top
+to bottom. The next song fades in over about a bar, playing its own lead-up,
+and reaches *its* start point exactly on the bar where the song before it
+stops: no gap, and the beat grid continues.
+
+- **Cut a song**: click it in the Music tab (it opens in the Song view), play
+  it, and press **✂ Switch to next song here (C)** where the next song should
+  take over. For the last song the button is **✂ End the music here**. The
+  cut snaps to the bar line. Without a cut, a song plays until its last loud
+  bar (the last song plays to its end); **✂ Auto** goes back to that.
+- **Change the order**: drag the songs, or use ▲▼. The first song's start
+  point is where the first combo hit lands.
+- **Remove a song**: ✕. Any song can go, the first one too, as long as one
+  song is left.
+
+Nothing is analysed again: each song keeps its beat, start, cut and beat fixes
+when it moves.
 
 ### Letterbox and flash
 
 The cinematic bars show during the slow-mo intro (and slow-mo lead-ins). A
-quick flash marks the first hit, and the combos play full frame. Advanced →
-Letterbox can switch to "Intro + first combo", "Every combo" or off.
+quick flash marks the first hit, and the combos play full frame. Tick
+**🎬 Focus bars** on any combo to keep bars on through it. Effects → Focus
+bars switches the automatic bars to "Intro + 1st combo", "Every combo" or off.
 
 ### Timeline and Advanced
 
@@ -136,7 +156,11 @@ What you can do on it:
 
 - Double-click to add a beat or hit; right-click deletes one.
 - **S** splits a combo, **M** merges it with the one before.
-- The mouse wheel zooms.
+- The mouse wheel or the scrollbar scrolls; **Ctrl/⌘ + wheel** zooms.
+
+On a small screen the whole window scrolls instead of cutting off, and the
+mouse wheel over a slider scrolls the panel (click a slider first to change
+it with the wheel).
 
 **⚙ Advanced** has every other setting, all with good defaults:
 
@@ -156,6 +180,7 @@ What you can do on it:
 | ← → | One beat back / forward |
 | M | Mark (Song / Gameplay tab) |
 | T | Tap tempo (Song tab) |
+| C | Cut: the next song takes over here / the music ends here (Song tab) |
 | Ctrl/⌘ + S / O / E | Save project / open project / export |
 
 ## Command line
@@ -165,13 +190,15 @@ python -m hitsync                                  # the app (drop files, or pas
 python -m hitsync beats song.mp3 --click check.wav # what was detected + a click track
 python -m hitsync run pvp.mp4 song1.mp3 song2.mp3 -o montage.mp4 --style hype \
     --beats-per-hit auto --text "0:02-0:05=GG EZ@top" --effect "flashy=0:10-0:18" \
-    --fade-in black --fade-out white [--drop 20.4] [--dry-run] [--save-project p.json]
+    --focus 1,3 --fade-in black --fade-out white [--drop 20.4] [--dry-run] \
+    [--save-project p.json]
 python -m hitsync check                            # dependencies + ffmpeg
 python -m unittest discover -s tests -t .          # tests
 python tools/bench.py                              # speed benchmark
 ```
 
-`--text` and `--effect` times count from the start of the montage.
+`--text` and `--effect` times count from the start of the montage. `--focus`
+puts focus bars on those combos (numbered in time order).
 
 ## How it works
 
@@ -203,7 +230,8 @@ overall loudness.
   stretch.
 - **Drop**: the bar line where kick and bass rise and *stay* up. A snare-roll
   build scores lower than the drop it leads into.
-- **Default**: the earliest strong moment.
+- **Default**: the earliest strong moment (with at least 4 bars of song after
+  it).
 - **Slow-mo intro**: the whole song intro when it is short, otherwise 4 bars
   (2 for slow songs). It never starts in silence.
 
@@ -286,5 +314,5 @@ tests/               engine, beat grid, plan, effects, multi-song, preview, UI t
 tools/bench.py       speed benchmark
 ```
 
-Fonts: Anton and Montserrat Black, under the SIL Open Font License (see
-`hitsync/assets/fonts/OFL.txt`).
+Fonts: Anton, Montserrat Black and Fredoka Bold, under the SIL Open Font
+License (see `hitsync/assets/fonts/OFL.txt`).

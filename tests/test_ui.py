@@ -41,6 +41,9 @@ class AppTests(unittest.TestCase):
         cls.song = os.path.join(d, "song.wav")
         y, cls.info = sm.shape_like(duration=70.0)
         sm.write_wav(cls.song, y)
+        cls.song2 = os.path.join(d, "song2.wav")
+        y2, cls.info2 = sm.edm_like(duration=60.0)
+        sm.write_wav(cls.song2, y2)
         cls.dir = d
         from hitsync.ui import theme
         from hitsync.ui.main_window import MainWindow
@@ -222,6 +225,140 @@ class AppTests(unittest.TestCase):
         self.assertTrue(self.wait_idle())
         self.assertIsNotNone(w.project.schedule)
         self.assertEqual(w.combos.list.count(), 3)
+
+    def test_9a_focus_bars_and_glow_text(self):
+        w = self.w
+        w.side.setCurrentWidget(w.combos)
+        self.pump(0.1)
+        row = w.combos.list.itemWidget(w.combos.list.item(1))
+        row.focus.setChecked(True)                           # 🎬 on the 2nd combo
+        self.pump(0.4)
+        p = w.project
+        self.assertTrue(p.combo_plan[1].focus)
+        s = p.schedule
+        (a0, b0, _), (a1, b1, _) = s.combo_spans[:2]
+        self.assertEqual(s.letterbox_amount((a1 + b1) / 2), 1.0)
+        self.assertEqual(s.letterbox_amount((a0 + b0) / 2), 0.0)
+        # the Effects panel switches the automatic bars; focus bars stay
+        w.fx_panel._push("sync", "letterbox_mode", "off")
+        self.pump(0.3)
+        s = p.schedule
+        self.assertEqual(s.letterbox_amount(s.start + 0.5), 0.0)
+        self.assertEqual(s.letterbox_amount((a1 + b1) / 2), 1.0)
+        w.fx_panel._push("sync", "letterbox_mode", "slowmo")
+        row = w.combos.list.itemWidget(w.combos.list.item(1))
+        row.focus.setChecked(False)
+        self.pump(0.3)
+        self.assertFalse(p.combo_plan[1].focus)
+        # new captions use the glow style
+        w.seek(p.schedule.start + 3.0)
+        w._add_text()
+        self.pump(0.2)
+        self.assertEqual(p.texts[-1].style, "glow")
+        self.assertEqual(w.texts.rows[-1].style.currentText(), "Glow (purple)")
+        p.texts.clear()
+        w.texts.set_items(p.texts)
+        w._overlays_changed()
+        self.pump(0.2)
+
+    def test_9b_music_tab_order_cut_remove(self):
+        w = self.w
+        p = w.project
+        drop1 = p.sync.drop_time
+        w.drop_files([self.song2])
+        self.assertTrue(self.wait_idle())
+        self.assertEqual(w.music_panel.list.count(), 2)
+        self.assertIsNotNone(p.timeline())
+        # ✂ on song 1: the second song takes over on that bar
+        w._song_selected(0)
+        self.pump(0.2)
+        self.assertEqual(w.mode, "song")
+        w.seek(drop1 + 10.1)
+        w.cut()
+        self.pump(0.3)
+        cut, auto = p.song_end(0)
+        self.assertFalse(auto)
+        self.assertAlmostEqual(p.timeline().handovers[0], cut, places=6)
+        self.assertAlmostEqual(cut, drop1 + 10.0, delta=1.3)        # snapped to a bar
+        self.assertEqual(w.song_view.end, cut)
+        self.assertIn("✂", w.music_panel.list.itemWidget(w.music_panel.list.item(0)).cut_lbl.text())
+        # reorder: song 2 first (its drop becomes the music start)
+        w._move_song(1, -1)
+        self.pump(0.3)
+        self.assertEqual(p.music_paths, [self.song2, self.song])
+        self.assertEqual(p.stale(), (False, False))
+        self.assertAlmostEqual(p.sync.drop_time, self.info2["drop"], delta=0.05)
+        self.assertIsNotNone(p.schedule)
+        # drag order back
+        w._song_order([1, 0])
+        self.pump(0.3)
+        self.assertEqual(p.music_paths, [self.song, self.song2])
+        self.assertAlmostEqual(p.music_cut, cut, places=6)          # the cut came along
+        # delete the first song: the second one is the whole soundtrack now
+        w._remove_song(0)
+        self.pump(0.3)
+        self.assertEqual(p.music_paths, [self.song2])
+        self.assertEqual(w.music_panel.list.count(), 1)
+        rm = [b for b in w.music_panel.list.itemWidget(w.music_panel.list.item(0))
+              .findChildren(type(w.cut_btn)) if b.text() == "✕"][0]
+        self.assertFalse(rm.isEnabled())                            # the last song stays
+        # back to the original song for the tests after this one
+        w.drop_files([self.song])
+        self.assertTrue(self.wait_idle())
+        w._remove_song(0)
+        w._reset_cut(0)
+        self.pump(0.3)
+        self.assertEqual(p.music_paths, [self.song])
+        self.assertIsNone(p.timeline())
+        self.assertAlmostEqual(p.sync.drop_time, drop1, delta=0.02)
+        w.set_mode("montage")
+        self.pump(0.2)
+
+    def test_9c_scrolling_and_small_screens(self):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QSlider
+
+        w = self.w
+        self.assertLessEqual(w.page.widget().minimumSizeHint().width(), 1000)
+        # the wheel over a slider you haven't clicked doesn't change it
+        w.side.setCurrentWidget(w.fx_panel)
+        self.pump(0.1)
+        slider = w.fx_panel.findChildren(QSlider)[3]
+
+        def wheel(widget, dy, mods=Qt.NoModifier):
+            e = QWheelEvent(QPointF(5, 5), QPointF(widget.mapToGlobal(QPoint(5, 5))), QPoint(0, 0),
+                            QPoint(0, dy), Qt.NoButton, mods, Qt.NoScrollPhase, False)
+            QApplication.sendEvent(widget, e)
+            return e
+
+        before = slider.value()
+        e = wheel(slider, -120)
+        self.assertFalse(e.isAccepted())                     # handed on to the panel
+        self.assertEqual(slider.value(), before)
+        self.assertEqual(slider.focusPolicy(), Qt.StrongFocus)
+        # the whole window scrolls instead of cutting off on a small screen
+        w.tl_btn.setChecked(True)
+        w.resize(900, 560)
+        self.pump(0.3)
+        self.assertGreater(w.page.verticalScrollBar().maximum(), 0)
+        # the timeline scrolls (wheel, scrollbar) and zooms with Ctrl
+        tl = w.timeline
+        tl.pps = 80.0
+        tl.offset = 0.0
+        tl.update()
+        self.pump(0.1)
+        self.assertGreater(tl.hbar.maximum(), 0)
+        tl.hbar.setValue(400)
+        self.assertAlmostEqual(tl.offset, 400 / 80.0)
+        wheel(tl, -240)
+        self.assertGreater(tl.offset, 400 / 80.0)
+        self.assertEqual(tl.pps, 80.0)
+        wheel(tl, 120, Qt.ControlModifier)
+        self.assertGreater(tl.pps, 80.0)
+        w.tl_btn.setChecked(False)
+        w.resize(1300, 850)
+        self.pump(0.2)
 
 
 if __name__ == "__main__":

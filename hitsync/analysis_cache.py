@@ -14,7 +14,7 @@ import os
 import tempfile
 
 # Bump when an analysis algorithm changes so old results aren't reused.
-VERSION = {"audio": 3, "video": 2}
+VERSION = {"audio": 4, "video": 2}
 MAX_ENTRIES = 40
 
 

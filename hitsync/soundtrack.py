@@ -6,6 +6,9 @@ next song crossfades in over about a bar, playing the lead-up to its own
 start point, and reaches that start point exactly on the bar where song 1
 hands over: no gap, and the beat grid continues without a hiccup (song 1's
 beats up to the hand-over, then song 2's from its start point).
+
+A song can be cut (``cut``): it hands over, or for the last song the music
+ends, at that bar instead of its automatic end.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ class Song:
     end: float = 0.0            # song time where it hands over to the next song
     beats: np.ndarray = field(default_factory=lambda: np.zeros(0))
     downbeats: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    cut: bool = False           # `end` was chosen: the last song ends there too
 
     @property
     def bar(self) -> float:
@@ -49,8 +53,8 @@ class MusicTimeline:
         self.handovers: List[float] = []
         first = songs[0]
         end = first.duration
-        if len(songs) > 1:
-            end = first.end if first.end > 0 else first.duration
+        if len(songs) > 1 or first.cut:
+            end = first.end if 0 < first.end <= first.duration else first.duration
         self.pieces.append(Piece(0, 0.0, 0.0, end))
         for k in range(1, len(songs)):
             prev, song = self.pieces[-1], songs[k]
@@ -58,11 +62,16 @@ class MusicTimeline:
             xf = float(np.clip(songs[k - 1].bar * xfade_bars, 1.0, 4.0))
             lead = min(xf, song.start)                      # can't start before 0
             last = k == len(songs) - 1
-            s_end = song.duration if last or song.end <= song.start else song.end
+            keep_all = (last and not song.cut) or not song.start < song.end <= song.duration
+            s_end = song.duration if keep_all else song.end
             offset = T - song.start
             prev.fade_out = min(xf, prev.out_b - prev.out_a)
             self.pieces.append(Piece(k, offset, T - lead, s_end + offset, fade_in=lead))
             self.handovers.append(T)
+        tail = self.pieces[-1]
+        if tail.out_b - tail.offset < songs[tail.song].duration - 1e-6:
+            # the music is cut before the song ends: a few ms fade, no click
+            tail.fade_out = max(tail.fade_out, min(0.05, tail.out_b - tail.out_a))
 
     # ------------------------------------------------------------ timing
     @property
@@ -75,8 +84,11 @@ class MusicTimeline:
             s = self.songs[p.song]
             t = np.asarray(getattr(s, attr), float) + p.offset
             lo = self.handovers[i - 1] if i > 0 else -np.inf
-            hi = self.handovers[i] if i < len(self.handovers) else np.inf
-            out.append(t[(t >= lo - 1e-6) & (t < hi - 1e-6)])
+            if i < len(self.handovers):
+                keep = t < self.handovers[i] - 1e-6
+            else:
+                keep = t <= p.out_b + 1e-6                  # the music ends there
+            out.append(t[(t >= lo - 1e-6) & keep])
         return np.concatenate(out) if out else np.zeros(0)
 
     def beats(self) -> np.ndarray:
