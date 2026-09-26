@@ -18,14 +18,17 @@ def check_dependencies() -> bool:
     ok = True
     print(f"Python {sys.version.split()[0]}")
     for mod, pip_name in [("numpy", "numpy"), ("scipy", "scipy"), ("librosa", "librosa"),
-                          ("cv2", "opencv-python"), ("customtkinter", "customtkinter"),
-                          ("PIL", "pillow"), ("tkinter", "(bundled with Python)")]:
+                          ("cv2", "opencv-python"), ("PySide6", "PySide6-Essentials"),
+                          ("PIL", "pillow"), ("sounddevice", "sounddevice")]:
+        optional = mod == "sounddevice"             # preview plays silently without it
         try:
             m = importlib.import_module(mod)
             print(f"  [ok] {mod:<14} {getattr(m, '__version__', '')}")
         except Exception as exc:
-            ok = False
-            print(f"  [!!] {mod:<14} missing -> pip install {pip_name}  ({exc})")
+            ok = ok and optional
+            tag = "--" if optional else "!!"
+            print(f"  [{tag}] {mod:<14} missing -> pip install {pip_name}  ({exc})"
+                  + ("  (optional: preview sound)" if optional else ""))
     from .ffmpeg_utils import find_ffmpeg
 
     exe = find_ffmpeg()
@@ -128,7 +131,8 @@ def main(argv=None) -> int:
             pass
     ap = argparse.ArgumentParser(prog="hitsync", description="Minecraft PvP montage hit-sync")
     sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("gui", help="launch the desktop editor (default)")
+    g = sub.add_parser("gui", help="launch the desktop app (default)")
+    g.add_argument("files", nargs="*", help="video / songs / project to open")
     sub.add_parser("check", help="verify dependencies")
     bt = sub.add_parser("beats", help="show the detected tempo, beats and music start")
     bt.add_argument("song")
@@ -171,10 +175,9 @@ def main(argv=None) -> int:
         return run(args)
     if args.cmd == "beats":
         return beats(args)
-    from .gui.app import main as gui_main
+    from .ui import main as gui_main
 
-    gui_main()
-    return 0
+    return gui_main([sys.argv[0]] + list(getattr(args, "files", []) or []))
 
 
 if __name__ == "__main__":

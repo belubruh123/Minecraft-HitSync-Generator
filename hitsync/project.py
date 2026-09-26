@@ -129,6 +129,10 @@ class Project:
             redo_only = True
         else:
             redo_only = False
+        # only what's there: the app analyses a file as soon as it's dropped
+        have_a = bool(self.music_path) and os.path.isfile(self.music_path)
+        have_v = bool(self.video_path) and os.path.isfile(self.video_path)
+        need_a, need_v = need_a and have_a, need_v and have_v
         self._sync_extra_lists()
         akey, vkey = self.current_audio_key(), self.current_video_key()
         frac = {"a": 0.0, "v": 0.0}
@@ -195,7 +199,8 @@ class Project:
         if video is not None:
             self.video, self.video_key = video, vkey
             self.redetect_hits()
-        self.auto_intro()                  # depends on the drop and the hits
+        if self.video is not None:
+            self.auto_intro()              # depends on the drop and the hits
         if redo_only:
             return False, False
         return need_a, need_v
